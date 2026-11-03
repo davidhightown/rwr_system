@@ -131,7 +131,12 @@ Make sure that the servo wiring is correct before you connect the power: the ser
 
      # record all 17 joints, about 6 minutes
      python experiments/orca/chirp_all.py --execute
+
+     # optional: no ramp to each joint's first chirp sample
+     python experiments/orca/chirp_all.py --no-ramp --execute
    ```
+
+     With `--no-ramp`, each joint jumps to its first chirp sample at full motor speed, and the previous joint snaps back to neutral, so test it on one joint with a small amplitude first. The recorded sweep is the same, so the fit does not change.
 
      After the run, the script shows a table and `overview.png`, and asks whether the run was good. Answer `n` only if the run itself was disturbed (bumped, loaded, loose cable): a genuine outlier is still a good run, and it is what you want to measure. The answer goes into the folder name, so `ls -d logs/chirp_v2/*_good` lists the good runs. Press Enter to decide later and rename the folder yourself, and do not tag test runs as good. Each folder has the `config.yaml` and `calibration.yaml` of that run, and its name has the start time in UTC. `logs/chirp_v2/` is ignored by git, so copy the runs somewhere safe. See [experiments/orca/README.md](experiments/orca/README.md).
 5. **Fit the joint parameters** on the training computer, in the Python environment with Isaac Lab, from `scripts/motor_param_characterization` in `rwr_faive_lab`. Install the fit's packages once with `python -m pip install scikit-optimize pandas`. The simulator's joint names have the prefix `right_`:

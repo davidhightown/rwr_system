@@ -60,6 +60,10 @@ It uses the installed `~/ros_ws/install/.../right/config.yaml` and the
 need the copy from step 2 above. The sweep options are the same as for `chirp.py`, and
 `--joints` limits the run to some joints.
 
+By default each joint ramps to its first chirp sample over about 1 s. `--no-ramp` skips this: the
+joint jumps there at full motor speed and the previous joint snaps back to neutral. `metadata.json`
+records the choice under `ramp_to_start`. The initial move to neutral at startup still ramps.
+
 `--finger` (default `middle`) only saves the finger meant for the fit in
 `metadata.json`, under `fit_finger` and `fit_joints`, so you can still fit another finger later.
 Before it moves, the script warns you if a joint's motor travel in `calibration.yaml` is more than

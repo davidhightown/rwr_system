@@ -40,6 +40,9 @@ def make_parser():
     parser.add_argument("--center-deg", type=float, default=None,
                         help="Sweep center; by default use each joint's ROM midpoint.")
     parser.add_argument("--settle-time", type=float, default=1.0)
+    parser.add_argument("--no-ramp", action="store_true",
+                        help="Jump straight to each joint's first chirp sample instead of ramping for about 1 s. "
+                             "The previous joint also snaps back to neutral. Moves at full motor speed.")
     parser.add_argument("--output-dir", type=Path, default=Path("logs/chirp_v2"))
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--execute", action="store_true", help="Connect and move real hardware.")
@@ -98,6 +101,7 @@ def make_plan(args, config):
         "f1_hz": args.f1,
         "amplitude_deg": args.amplitude_deg,
         "settle_time_s": args.settle_time,
+        "ramp_to_start": not args.no_ramp,
         "sample_count_per_joint": len(sample_times(args)),
     }
 
@@ -114,9 +118,12 @@ def collect_joint(hand, args, plan, joint, path, *, clock=time.monotonic, sleep=
     )
     command = dict(plan["config"]["neutral_position"])
     command[joint] = float(trajectory[0])
-    # Ramp for roughly one second rather than jumping to the first chirp sample.
-    hand.set_joint_positions(command, num_steps=max(2, math.ceil(args.ctrl_freq)),
-                             step_size=1.0 / args.ctrl_freq)
+    if args.no_ramp:
+        hand.set_joint_positions(command)
+    else:
+        # Ramp for roughly one second rather than jumping to the first chirp sample.
+        hand.set_joint_positions(command, num_steps=max(2, math.ceil(args.ctrl_freq)),
+                                 step_size=1.0 / args.ctrl_freq)
     sleep(args.settle_time)
 
     with path.open("x", newline="") as stream:

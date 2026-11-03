@@ -48,6 +48,7 @@ class Hand:
     def __init__(self, clock):
         self.clock = clock
         self.commands = []
+        self.command_kwargs = []
         self.events = []
         self.reads = 0
         self.read_latency = 0.0
@@ -77,6 +78,7 @@ class Hand:
 
     def set_joint_positions(self, command, **kwargs):
         self.commands.append(dict(command))
+        self.command_kwargs.append(kwargs)
 
     def get_joint_position(self):
         self.reads += 1
@@ -172,6 +174,26 @@ def test_real_samples_keep_csv_schema_and_other_joints_neutral(experiment):
     assert hand.events == ["connect", "init", "disable", "disconnect"]
     assert clock.now == pytest.approx(.2)
     assert json.loads((run_dir / "metadata.json").read_text())["status"] == "complete"
+
+
+@pytest.mark.parametrize("no_ramp, first_kwargs", [
+    (False, dict(num_steps=20, step_size=.05)),
+    (True, {}),
+])
+def test_no_ramp_commands_the_first_sample_directly(experiment, no_ramp, first_kwargs):
+    args, plan, _, hand = experiment
+    args.no_ramp = no_ramp
+    plan = chirp.make_plan(args, plan["config"])
+    run_dir = run((args, plan, _, hand))
+    assert hand.command_kwargs[0] == first_kwargs
+    assert hand.command_kwargs[1:] == [{}] * 4
+    assert hand.commands[0]["index_mcp"] == float(csv_rows(run_dir)[0]["commanded_position"])
+    assert json.loads((run_dir / "metadata.json").read_text())["ramp_to_start"] is not no_ramp
+
+
+def test_chirp_all_accepts_no_ramp():
+    assert chirp_all.make_parser().parse_args(["--no-ramp"]).no_ramp is True
+    assert chirp_all.make_parser().parse_args([]).no_ramp is False
 
 
 def test_uncalibrated_hand_does_not_connect_or_auto_calibrate(experiment):
