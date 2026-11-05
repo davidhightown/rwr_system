@@ -2,7 +2,9 @@
 
 ### Run a faive_lab policy on the hand
 
-`rl_inference/policy_inference_cube_spin_v2.py` runs a policy trained in faive_lab (task `orca-v2-inhand-repose-v0`) on the real hand. Use the TorchScript file that faive_lab's `play.py` exports: `logs/rsl_rl/orca_v2_repose/<run>/exported/policy.pt`.
+`rl_inference/policy_inference_cube_spin_v2.py` runs a policy trained in faive_lab on the real hand. Use the TorchScript file that faive_lab's `play.py` exports: `logs/rsl_rl/orca_v2_repose/<run>/exported/policy.pt`.
+
+By default, the node expects a policy with the cube pose (task `orca-v2-inhand-repose-extero-v0`, 82 observations), see [Run the full system with the cube pose](#run-the-full-system-with-the-cube-pose). For a policy without it (task `orca-v2-inhand-repose-v0`, 74 observations), add `-p use_cube_pose:=false` in step 2 below.
 
 1. Start the hand controller (see [src/hand_control/README.md](../src/hand_control/README.md)):
     ```bash
@@ -24,6 +26,8 @@ Useful parameters (add each as `-p name:=value`):
 | `goal_flip_period_s` | `0.0` | if > 0, flip the spin direction every this many seconds |
 | `csv_log_path` | `""` | if set, log observations, joint commands and the cube pose to this CSV file |
 | `policy_hz` | `20.0` | policy rate; must match the training task |
+| `use_cube_pose` | `true` | `false`: a policy without the cube pose (74 observations) |
+| `cube_pose_timeout_s` | `0.25` | an older cube pose counts as lost; must match `timeout_s` of `CUBE_TRACKER` in faive_lab |
 
 The joint limits, observation order and scales in the script must match the faive_lab task (`orca_v2_repose_env_cfg.py`).
 
@@ -67,6 +71,26 @@ The launch places the hand relative to the tag with the `hand_to_tag_*` argument
 4. Check: `ros2 run tf2_ros tf2_echo mount tag_frame` prints your x/y/z, and in RViz the hand model stands where the real hand is.
 
 
+### Run the full system with the cube pose
+
+Do the steps in [Detect the cube](#detect-the-cube), [Calibrate the camera](#calibrate-the-camera) and [Set the hand's position](#set-the-hands-position) first. Use the Linux robot PC with the NVIDIA GPU: the detector must reach the policy's 20 Hz.
+
+```bash
+ros2 launch experiments cube_spin_v2.launch.py \
+    calibration:=$HOME/camera_extrinsics.npy \
+    model_path:=/path/to/pose_estimation/finetuned_models/maskrcnn-finetuned_lightning_new_adamw.ckpt \
+    policy:=/path/to/exported/policy.pt \
+    enable_hand_controller:=true dry_run:=true csv_log_path:=$HOME/cube_dry_run.csv \
+    hand_to_tag_x:=... hand_to_tag_y:=... hand_to_tag_z:=... \
+    hand_to_tag_roll:=... hand_to_tag_pitch:=... hand_to_tag_yaw:=...
+```
+
+The launch file also takes `use_cube_pose`, `goal_ang_vel` and `goal_flip_period_s`.
+
+- The policy starts at the first cube pose, and it commands nothing until then. So start without a cube in view, or with the cube already in the palm: **without `dry_run`, the hand moves at the first detection.**
+- While the cube is lost, the policy gets the last pose with the flag `tracked` = 0, as in the simulated tracker.
+- In the dry run, check the log line of the node: with the cube in the palm, `pos` is in the frame of the simulation, a few centimetres from the commanded position (0, 0, -0.05), and it follows the cube when you move it (+z is up). The CSV columns `cube_tracked` and `cube_age_s` show how often the cube is lost and how old the pose is. Compare them with `CUBE_TRACKER` in faive_lab.
+
 ### Troubleshooting
 
 **Camera**
@@ -79,7 +103,8 @@ The launch places the hand relative to the tag with the `hand_to_tag_*` argument
 - Joint positions look wrong after rebuilding: `calibration.yaml` lives in `install/` (see [src/hand_control/README.md](../src/hand_control/README.md)); calibrate again.
 
 **Policy**
-- `RuntimeError: The size of tensor a (74) must match the size of tensor b (81)` at startup: the policy expects a different observation than the script builds (e.g. a policy trained with the cube pose). `OBS_DIM` and the observation in the script must match the training task.
+- `The policy does not take N observations` at startup: the policy expects a different observation than the script builds. A policy with the cube pose takes 82, a policy without it takes 74 (`use_cube_pose:=false`). The observation in the script must match the training task.
+- `Waiting for the first cube pose` does not stop: there is no recent `hand_root` -> `cube` transform. Check `ros2 run tf2_ros tf2_echo hand_root cube`, the `calibration:=` path (without it, the launch file does not publish the camera's position) and that the detector sees the cube.
 
 **Cube detection**
 - `checkpoint.pth.tar not found` when the detector starts: the model files are not downloaded yet; run `experiments/rl_inference/pose_estimation/download_models.sh`.
