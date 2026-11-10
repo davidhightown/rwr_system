@@ -680,6 +680,27 @@ def test_neighbours_hold_their_clearance_pose_during_the_sweep(experiment):
             assert command[name] == target
 
 
+def test_abd_clear_all_pushes_neighbours_to_rom_limits():
+    """--abd-clear-all sends every other finger's abduction to its ROM limit, not just the minimum gap."""
+    config = yaml.safe_load(chirp.DEFAULT_CONFIG.read_text())
+    args = chirp.make_parser().parse_args(["--joints", "ring_abd", "--abd-clear-all"])
+    plan = chirp.make_plan(args, config)
+    pose = plan["neighbour_pose"]["ring_abd"]
+    roms = config["joint_roms"]
+    for name in ("index_abd", "middle_abd"):
+        assert pose[name] == pytest.approx(roms[name][0] + chirp.ROM_MARGIN_DEG)
+    assert pose["pinky_abd"] == pytest.approx(roms["pinky_abd"][1] - chirp.ROM_MARGIN_DEG)
+    assert plan["abd_clear_all"] is True
+
+
+def test_abd_clear_all_in_chirp_all_default(all_run, capsys):
+    """chirp_all defaults to --abd-clear-all; neighbours go to ROM limits for abduction joints."""
+    assert all_run.main("--joints", "ring_abd", execute=False) == 0
+    # The preview prints the plan JSON with abd_clear_all: true
+    output = capsys.readouterr().out
+    assert '"abd_clear_all": true' in output
+
+
 def test_chirp_all_flags_the_side_a_joint_stops_short():
     t = np.arange(0, 20, 0.05)
     commanded = 10 * np.sin(2 * np.pi * 0.3 * t)

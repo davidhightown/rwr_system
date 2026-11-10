@@ -39,39 +39,55 @@ FINGERS = ["index", "middle", "ring", "pinky"]  # thumb side to little-finger si
 ROM_MARGIN_DEG = 2.0  # neighbours are never sent closer than this to their ROM limits
 
 
-def finger_layout(config, joint, center, reach, gap):
+def finger_layout(config, joint, center, reach, gap, *, clear_all=False):
     """Abduction targets of the other fingers while ``joint`` sweeps center +/- reach.
 
     Positive abduction points toward the pinky (config.yaml's neutral pose fans out from -14 at the index to
     +22 at the pinky). Adjacent fingers touch when their abduction angles get too close: on the 2026-11 runs
     ring_abd stopped about 6 deg short on the middle-finger side, and middle_abd on both sides. Each neighbour is
     therefore pushed outward from neutral just enough to stay ``gap`` degrees from the next finger inward.
+
+    With ``clear_all``, every neighbour is pushed to its ROM limit (minus ROM_MARGIN_DEG) on the side away from
+    the tested joint, ignoring ``gap``. This gives the sweep maximum clearance when the gap heuristic is not enough.
+
     Returns {joint: target} for the neighbours that move ({} for a non-abduction joint or gap 0), or None if
     a neighbour would have to leave its ROM.
     """
-    if gap <= 0 or not joint.endswith("_abd") or joint.split("_")[0] not in FINGERS:
+    if (gap <= 0 and not clear_all) or not joint.endswith("_abd") or joint.split("_")[0] not in FINGERS:
         return {}
     roms, neutral = config["joint_roms"], config["neutral_position"]
     tested = FINGERS.index(joint.split("_")[0])
     targets = {}
-    bound = center - reach - gap
-    for k in range(tested - 1, -1, -1):
-        name = f"{FINGERS[k]}_abd"
-        target = min(neutral[name], bound)
-        if target < roms[name][0] + ROM_MARGIN_DEG:
-            return None
-        if target != neutral[name]:
-            targets[name] = target
-        bound = target - gap
-    bound = center + reach + gap
-    for k in range(tested + 1, len(FINGERS)):
-        name = f"{FINGERS[k]}_abd"
-        target = max(neutral[name], bound)
-        if target > roms[name][1] - ROM_MARGIN_DEG:
-            return None
-        if target != neutral[name]:
-            targets[name] = target
-        bound = target + gap
+    if clear_all:
+        for k in range(tested - 1, -1, -1):
+            name = f"{FINGERS[k]}_abd"
+            target = roms[name][0] + ROM_MARGIN_DEG
+            if target != neutral[name]:
+                targets[name] = target
+        for k in range(tested + 1, len(FINGERS)):
+            name = f"{FINGERS[k]}_abd"
+            target = roms[name][1] - ROM_MARGIN_DEG
+            if target != neutral[name]:
+                targets[name] = target
+    else:
+        bound = center - reach - gap
+        for k in range(tested - 1, -1, -1):
+            name = f"{FINGERS[k]}_abd"
+            target = min(neutral[name], bound)
+            if target < roms[name][0] + ROM_MARGIN_DEG:
+                return None
+            if target != neutral[name]:
+                targets[name] = target
+            bound = target - gap
+        bound = center + reach + gap
+        for k in range(tested + 1, len(FINGERS)):
+            name = f"{FINGERS[k]}_abd"
+            target = max(neutral[name], bound)
+            if target > roms[name][1] - ROM_MARGIN_DEG:
+                return None
+            if target != neutral[name]:
+                targets[name] = target
+            bound = target + gap
     return targets
 
 
@@ -108,6 +124,9 @@ def make_parser():
                         help="During a finger's abduction sweep, spread the other fingers so adjacent abduction "
                              "angles stay at least this far apart (moving the sweep center toward the free side "
                              "if needed). 0: other fingers stay at neutral, sweep at the ROM midpoint.")
+    parser.add_argument("--abd-clear-all", action="store_true",
+                        help="Push every other finger's abduction to its ROM limit during an abduction sweep, "
+                             "instead of the minimum gap. Overrides --abd-gap-deg for abduction joints.")
     parser.add_argument("--settle-time", type=float, default=1.0)
     parser.add_argument("--no-ramp", action="store_true",
                         help="Jump straight to each joint's first chirp sample instead of ramping for about 1 s. "
@@ -157,31 +176,37 @@ def make_plan(args, config):
 
     if not math.isfinite(args.abd_gap_deg) or args.abd_gap_deg < 0:
         raise ValueError("abd_gap_deg must be finite and non-negative")
-    if args.abd_gap_deg > 0:
+    if args.abd_gap_deg > 0 or args.abd_clear_all:
         check_abduction_convention(config)
     reach = max([args.amplitude_deg, *args.steps_deg])
     centers, neighbours = {}, {}
     for joint in args.joints:
         lower, upper = roms[joint]
         middle = (lower + upper) / 2
-        if args.center_deg is not None:
-            candidates = [args.center_deg]
-        else:
-            # The ROM midpoint, else the closest center (0.5 deg grid) at which the neighbouring fingers can clear
-            # the sweep: an outer finger's abduction moves toward its free side.
-            grid = np.arange(lower + reach, upper - reach + 1e-9, 0.5).tolist()
-            candidates = sorted([middle] + grid, key=lambda c: abs(c - middle))
-        chosen = None
-        for center in candidates:
+        if args.abd_clear_all and joint.endswith("_abd") and joint.split("_")[0] in FINGERS:
+            # With --abd-clear-all, neighbours go to ROM limits; no grid search needed.
+            center = args.center_deg if args.center_deg is not None else middle
             if not math.isfinite(center) or center - reach < lower or center + reach > upper:
-                continue
-            layout = finger_layout(config, joint, center, reach, args.abd_gap_deg)
-            if layout is not None:
-                chosen = (center, layout)
-                break
-        if chosen is None:
-            raise ValueError(f"{joint}: center +/- amplitude or step exceeds ROM [{lower}, {upper}], or the "
-                             f"neighbouring fingers cannot keep {args.abd_gap_deg:g} deg clear (--abd-gap-deg)")
+                raise ValueError(f"{joint}: center +/- amplitude or step exceeds ROM [{lower}, {upper}]")
+            layout = finger_layout(config, joint, center, reach, args.abd_gap_deg, clear_all=True)
+            chosen = (center, layout)
+        else:
+            if args.center_deg is not None:
+                candidates = [args.center_deg]
+            else:
+                grid = np.arange(lower + reach, upper - reach + 1e-9, 0.5).tolist()
+                candidates = sorted([middle] + grid, key=lambda c: abs(c - middle))
+            chosen = None
+            for center in candidates:
+                if not math.isfinite(center) or center - reach < lower or center + reach > upper:
+                    continue
+                layout = finger_layout(config, joint, center, reach, args.abd_gap_deg)
+                if layout is not None:
+                    chosen = (center, layout)
+                    break
+            if chosen is None:
+                raise ValueError(f"{joint}: center +/- amplitude or step exceeds ROM [{lower}, {upper}], or the "
+                                 f"neighbouring fingers cannot keep {args.abd_gap_deg:g} deg clear (--abd-gap-deg)")
         centers[joint], neighbours[joint] = chosen
     return {
         "config_path": str(args.config.resolve()),
@@ -189,6 +214,7 @@ def make_plan(args, config):
         "joints": args.joints,
         "centers_deg": centers,
         "abd_gap_deg": args.abd_gap_deg,
+        "abd_clear_all": args.abd_clear_all,
         "neighbour_pose": neighbours,
         "ctrl_freq_hz": args.ctrl_freq,
         "read_hz": args.read_hz,

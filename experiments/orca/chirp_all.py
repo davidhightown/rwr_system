@@ -45,8 +45,7 @@ def make_parser():
     parser.description = __doc__
     # Steps after each chirp (about 8 s per joint) show the dead time and the ramp directly; --steps-deg with no
     # values turns them off.
-    # (12 is the largest step for which the other fingers can still clear every abduction sweep at --abd-gap-deg 8.)
-    parser.set_defaults(config=INSTALLED_CONFIG, joints=None, steps_deg=[2.0, 6.0, 12.0])
+    parser.set_defaults(config=INSTALLED_CONFIG, joints=None, steps_deg=[2.0, 6.0, 12.0], abd_clear_all=True)
     parser.add_argument("--finger", choices=FINGERS, default="middle",
                         help="Finger meant for the fit, saved in metadata.json. All fingers are recorded.")
     parser.add_argument("--notes", default="",
