@@ -52,7 +52,9 @@ class HostSync:
 
 
 # ---------- Pipeline factory ----------
-def create_pipeline(use_depth: bool, use_color: bool = True) -> dai.Pipeline:
+def create_pipeline(use_depth: bool, use_color: bool = True, exposure_us: int = 0, iso: int = 0) -> dai.Pipeline:
+    """exposure_us > 0: fixed exposure time (us) and sensitivity (ISO 100-1600) of the color camera instead of auto
+    exposure. A short exposure blurs moving objects less."""
     print("StereoDepth config options:",
         f"\n    Left-Right check:   {LRCHECK}",
         f"\n    Extended disparity: {EXTENDED}",
@@ -71,6 +73,8 @@ def create_pipeline(use_depth: bool, use_color: bool = True) -> dai.Pipeline:
         camRgb.setIspScale(1, 2)  # 1920x1080 -> 960x540
         camRgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.RGB)
         camRgb.initialControl.setManualFocus(130)
+        if exposure_us > 0:
+            camRgb.initialControl.setManualExposure(int(exposure_us), int(iso) if iso > 0 else 800)
         camRgb.isp.link(xout_colorize.input)
 
     if use_depth:
@@ -134,12 +138,14 @@ class OakDDriver:
     Reads from one physical OAK device, synchronizes streams, and pushes FramePackets to a queue.
     Never performs visualization or blocking GUI ops.
     """
-    def __init__(self, callback, device_mxid: Optional[str], camera_name: str, use_depth: bool, ir_brightness: int = 1200):
+    def __init__(self, callback, device_mxid: Optional[str], camera_name: str, use_depth: bool, ir_brightness: int = 1200,
+                 exposure_us: int = 0, iso: int = 0):
         self.callback = callback
         self.device_mxid = device_mxid
         self.camera_name = camera_name
         self.use_depth = use_depth
         self.ir_brightness = ir_brightness
+        self.exposure_us, self.iso = exposure_us, iso
 
         self._stop = threading.Event()
         self.thread = Thread(target=self._run, daemon=True)
@@ -155,7 +161,9 @@ class OakDDriver:
 
 
     def _run(self):
-        pipeline = create_pipeline(use_depth=self.use_depth, use_color=COLOR)
+        pipeline = create_pipeline(use_depth=self.use_depth, use_color=COLOR, exposure_us=self.exposure_us, iso=self.iso)
+        if self.exposure_us > 0:
+            print(f"[{self.camera_name}] manual exposure {self.exposure_us} us, ISO {self.iso or 800}")
 
         # Open device
         if self.device_mxid is None:

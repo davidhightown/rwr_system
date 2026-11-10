@@ -25,6 +25,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 import numpy as np
 import xacro
 
@@ -105,6 +106,24 @@ def generate_launch_description():
         description='Camera configuration file name (without .yaml)'
     )
     
+    camera_id_arg = DeclareLaunchArgument(
+        'camera_id',
+        default_value='',
+        description='Camera ID (mxid) instead of the one in the camera config; empty: the config\'s, or the only connected camera'
+    )
+
+    exposure_us_arg = DeclareLaunchArgument(
+        'exposure_us',
+        default_value='0',
+        description='> 0: fixed exposure time of the color camera in us (less motion blur); 0: auto exposure'
+    )
+
+    iso_arg = DeclareLaunchArgument(
+        'iso',
+        default_value='0',
+        description='Sensitivity (100-1600) with a fixed exposure; 0: 800'
+    )
+
     # ===== Enable/Disable Components =====
     enable_hand_controller_arg = DeclareLaunchArgument(
         'enable_hand_controller',
@@ -132,6 +151,9 @@ def generate_launch_description():
         hand_to_tag_yaw_arg,
         camera_name_arg,
         camera_config_arg,
+        camera_id_arg,
+        exposure_us_arg,
+        iso_arg,
         enable_hand_controller_arg,
         nodes,
     ])
@@ -212,7 +234,10 @@ def launch_setup(context, *args, **kwargs):
                 get_package_share_directory("experiments"), 
                 "cfgs", "cams", f"{camera_config}.yaml"
             ),
-            "use_depth": False
+            "use_depth": False,
+            "camera_id": ParameterValue(LaunchConfiguration('camera_id').perform(context), value_type=str),
+            "exposure_us": int(LaunchConfiguration('exposure_us').perform(context)),
+            "iso": int(LaunchConfiguration('iso').perform(context)),
         }],
     )
     

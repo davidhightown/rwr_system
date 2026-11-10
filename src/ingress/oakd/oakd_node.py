@@ -29,6 +29,11 @@ class OakDPublisher(Node):
         super().__init__("oakd_publisher")
         self.declare_parameter("use_depth", False)
         self.declare_parameter("config_file", "")
+        # > 0: fixed exposure time (us) and ISO of the color camera; 0: the camera's entry in the config file, else auto
+        self.declare_parameter("exposure_us", 0)
+        self.declare_parameter("iso", 0)
+        # a camera ID (mxid) to use instead of the one in the config file, e.g. another camera of the same setup
+        self.declare_parameter("camera_id", "")
         cfg_path: str = self.get_parameter("config_file").get_parameter_value().string_value
         if not cfg_path:
             cfg_path = os.path.join(os.path.dirname(__file__), "oakd_cams.yaml")
@@ -42,15 +47,38 @@ class OakDPublisher(Node):
         self.use_depth = self.get_parameter("use_depth").value
         self.bridge = CvBridge()
         self.camera_dict = {}
+        self.exposure = {}  # serial -> (exposure_us, iso)
         available_cams = dai.Device.getAllAvailableDevices()
         available_ids = [c.mxid for c in available_cams]
-        for serial_str, values in yaml_cfg.items():
+        entries = dict(yaml_cfg or {})
+        camera_id = self.get_parameter("camera_id").value.strip()
+        if camera_id:
+            # keeps the settings of the camera's entry, or of the only entry of a one-camera config
+            template = entries.get(camera_id) or (next(iter(entries.values())) if len(entries) == 1 else {})
+            entries = {camera_id: template}
+        for serial_str, values in entries.items():
             if serial_str not in available_ids:
-                self.get_logger().warn(f"oakd camera {serial_str} not available")
+                self.get_logger().warn(f"oakd camera {serial_str} not available (connected: {available_ids})")
                 continue
-            self.camera_dict[values.get("name", f"cam_{serial_str}")] = serial_str
-        
+            self._add_camera(serial_str, values)
+        if not self.camera_dict and not camera_id and len(entries) == 1 and len(available_ids) == 1:
+            # a one-camera setup with another camera than the config's: use the one that is connected
+            serial_str = available_ids[0]
+            self.get_logger().warn(f"using the only connected oakd camera {serial_str} instead of "
+                                   f"{next(iter(entries))} (parameter camera_id chooses one)")
+            self._add_camera(serial_str, next(iter(entries.values())))
+        if not self.camera_dict:
+            self.get_logger().error(f"no oakd camera of {cfg_path} connected; connected: {available_ids} "
+                                    "(parameter camera_id chooses one)")
+
         self.init_cameras()
+
+    def _add_camera(self, serial_str, values):
+        values = values or {}
+        self.camera_dict[values.get("name", f"cam_{serial_str}")] = serial_str
+        exposure_us = self.get_parameter("exposure_us").value or values.get("exposure_us", 0)
+        iso = self.get_parameter("iso").value or values.get("iso", 0)
+        self.exposure[serial_str] = (int(exposure_us), int(iso))
 
     def init_cameras(self):
 
@@ -61,7 +89,9 @@ class OakDPublisher(Node):
                     self.recv_oakd_images,
                     device_mxid=camera_id,
                     camera_name=camera_name,
-                    use_depth=self.use_depth
+                    use_depth=self.use_depth,
+                    exposure_us=self.exposure[camera_id][0],
+                    iso=self.exposure[camera_id][1],
                 ),
                 "rgb_output_pub": self.create_publisher(
                     Image, f"/oakd_{camera_name}/color",  
