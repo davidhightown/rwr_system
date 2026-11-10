@@ -26,10 +26,35 @@ def git_state(repo: Path) -> dict:
         return {}
 
 
-def session_info(args, repo: Path, hand_config: Path) -> dict:
+def save_code_changes(repo: Path, path: Path) -> str | None:
+    """git diff of the uncommitted changes (tracked files) plus the content of new files: with the commit, this is
+    the code that ran. Returns the file name, or None without changes."""
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True).stdout
+    try:
+        diff = git("diff", "HEAD")
+        untracked = [f for f in git("ls-files", "--others", "--exclude-standard").splitlines()
+                     if f.endswith((".py", ".yaml", ".yml", ".sh", ".xml", ".md", ".toml"))]
+    except OSError:
+        return None
+    for f in untracked:
+        try:
+            diff += f"\n=== new file (untracked): {f}\n" + (repo / f).read_text(errors="replace")
+        except OSError:
+            pass
+    if not diff.strip():
+        return None
+    path.write_text(diff)
+    return path.name
+
+
+def session_info(args, repo: Path, hand_config: Path, out: Path | None = None) -> dict:
     """What stays the same for all runs of one evaluation."""
-    return dict(host=socket.gethostname(), started=datetime.now().isoformat(timespec="seconds"),
-                options=vars(args), rwr_system=git_state(repo),
+    started = datetime.now()
+    changes = save_code_changes(repo, out / f"code_changes_{started:%Y%m%d_%H%M%S}.diff") if out else None
+    return dict(host=socket.gethostname(), started=started.isoformat(timespec="seconds"),
+                options=vars(args), note=getattr(args, "note", ""), rwr_system=git_state(repo) | dict(
+                    uncommitted_changes_file=changes),
                 hand_config=dict(path=str(hand_config), sha256=sha256(hand_config)))
 
 

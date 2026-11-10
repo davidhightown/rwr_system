@@ -1,4 +1,5 @@
-"""Offline tests of the turn counting, the drop detection and the live view, on synthetic detections (no ROS):
+"""Offline tests (no hardware) of the turn counting, the drop detection, the analysis, the live view, the video, the
+saving of results, the temperature filter and the servo status of the hand controller:
 
     pixi run python src/rwr_system/experiments/rl_inference/real_eval/test_offline.py [image.png]
 """
@@ -128,8 +129,137 @@ def main():
     if len(sys.argv) > 1:
         import cv2
         cv2.imwrite(sys.argv[1], frame)
+    results += check_recording_and_saving()
     print(f"\n{sum(results)} of {len(results)} checks passed")
     sys.exit(0 if all(results) else 1)
+
+
+def check_recording_and_saving():
+    """The parts added for the hardware runs: video thread, currents, temperature filter, model order, results files,
+    servo status bits and the cleanup of empty sessions."""
+    import csv
+    import json
+    import tempfile
+    import threading
+    import time
+    import types
+
+    import cv2
+
+    import evaluate_real_policies as ev
+    from real_eval.analysis import joint_summary, joint_tracking
+    from real_eval.live_view import VideoRecorder
+    from real_eval.processes import Processes
+    from real_eval.ros_interface import RosInterface
+    results, tmp = [], Path(tempfile.mkdtemp())
+
+    # video: written from its own thread in real time; closing while frames arrive must not crash
+    rec, stop = VideoRecorder(tmp / "v.mp4"), threading.Event()
+    frame = np.zeros((120, 160, 3), np.uint8)
+
+    def feed():
+        while not stop.is_set():
+            rec.write(frame)
+            time.sleep(0.01)
+    feeder = threading.Thread(target=feed)
+    feeder.start()
+    time.sleep(1.5)
+    rec.close()
+    stop.set()
+    feeder.join()
+    n = int(cv2.VideoCapture(str(tmp / "v.mp4")).get(cv2.CAP_PROP_FRAME_COUNT))
+    results.append(check("video while closing", 25 <= n <= 35, f"{n} frames in 1.5 s at 20 fps"))
+
+    # motor currents in the joint analysis
+    names = [f"j{i}" for i in range(17)]
+    t = np.arange(0, 10, 0.01)
+    cmd = np.sin(t)[:, None] * np.ones(17) * 0.5
+    cur = np.full((len(t), 17), 100.0)
+    cur[:, 3] = -400.0
+    tracking = joint_tracking([(t[i], cmd[i], np.roll(cmd, 15, axis=0)[i], cur[i]) for i in range(len(t))], names)
+    s = joint_summary(tracking)
+    results.append(check("motor currents", tracking[3].mean_abs_current_ma == 400 and s["total_current_a"] == 2.0
+                         and s["highest_current_joint"] == "j3",
+                         f"{s['total_current_a']} A, most: {s['highest_current_joint']}"))
+
+    # bad temperature readings (the wrist servo sent 150 C and 58 C at 30 C) are ignored; a repeated new value counts
+    ros = RosInterface.__new__(RosInterface)
+    ros.lock, ros.temps, ros._temp_pending, ros.temp_glitches = threading.Lock(), None, None, 0
+    seen = []
+    for wrist in [31, 31, 150, 31, 31, 58, 30, 32, 50, 50, 51]:
+        ros._temps_cb(types.SimpleNamespace(data=[wrist, 36.0]))
+        seen.append(float(ros.temps[0]))
+    results.append(check("temperature glitches", seen == [31, 31, 31, 31, 31, 31, 30, 32, 32, 50, 51]
+                         and ros.temp_glitches == 3, f"{ros.temp_glitches} ignored, wrist seen {seen}"))
+
+    # --models: in the command-line order, 9 = 09, names, no repeats
+    (tmp / "models.json").write_text(json.dumps([dict(idx=i, name=f"m{i}", dir="", goal=1.5) for i in (48, 20, 9, 44)]))
+    args = types.SimpleNamespace(models_dir=str(tmp), models=["44", "20", "9", "m48", "44"], oldest_first=False)
+    order = [m["idx"] for m in ev.load_models(args)]
+    results.append(check("model order", order == [44, 20, 9, 48], f"{order}"))
+
+    # results: a new column extends the header; only saved runs go into all_results.csv
+    e = ev.Evaluation.__new__(ev.Evaluation)
+    e.args = types.SimpleNamespace(models_dir=str(tmp))
+    session = tmp / "eval_x"
+    (session / "r1").mkdir(parents=True)
+    (session / "r2").mkdir()
+    e._save(session / "results.csv", dict(model="a", turns=1, valid="yes", run_dir=str(session / "r1")))
+    e._save(session / "results.csv", dict(model="b", turns=2, valid="no", run_dir=str(session / "r2"), new="x"))
+    rows = list(csv.DictReader(open(session / "results.csv")))
+    saved = list(csv.DictReader(open(tmp / "all_results.csv")))
+    results.append(check("results files", len(rows) == 2 and rows[0]["new"] == "" and len(saved) == 1
+                         and saved[0]["session"] == "eval_x", "both rows in the session, the saved one in all_results"))
+
+    # servo status: faults of the run and of the parking afterwards, lowest voltage
+    e.joint_ids = ["wrist", "index_abd", "pinky_mcp"]
+    e.ros = types.SimpleNamespace(lock=threading.Lock(), status_errors=np.array([0, 0x02, 0x20]))
+    e.motor_status = [(1.0, np.array([11.8, 11.9, 12.0]), None), (2.0, np.array([10.5, 11.0, 11.2]), None)]
+    e._run_errors = np.array([0, 0, 0x20])
+    s = e._motor_status_summary()
+    results.append(check("servo status", s == dict(min_voltage_v=10.5, servo_errors="pinky_mcp: overload",
+                                                   servo_errors_parking="index_abd: angle_sensor"), f"{s}"))
+
+    # the hand controller takes voltage and status bits from orca_core's last Feetech packet
+    import importlib.util
+    hc_path = Path(__file__).resolve().parents[3] / "src/hand_control/orca/hand_controller_v2.py"
+    spec = importlib.util.spec_from_file_location("hand_controller_v2", hc_path)
+    hc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hc)
+    from orca_core.hardware.feetech.group_sync_read import GroupSyncRead
+    reader = GroupSyncRead.__new__(GroupSyncRead)
+    reader.ph = types.SimpleNamespace(scs_makeword=lambda a, b: a | (b << 8))
+    reader.start_address, reader.data_length = 56, 15
+    reader.data_dict = {mid: [0x20 if mid == 3 else 0] + [0] * 6 + [118 + mid % 3] + [0] * 8 for mid in (1, 2, 3)}
+    hand = hc.OrcaHandV2.__new__(hc.OrcaHandV2)
+    hand.num_motors, hand._joint_order = 3, np.array([2, 0, 1])
+    hand._status_errors, hand._status_voltage = np.zeros(3, dtype=np.int64), np.full(3, np.nan)
+    hand.status_available, hand.status_problem = None, ""
+    hand._hand = types.SimpleNamespace(_motor_client=types.SimpleNamespace(_sync_reads={(56, 15): reader}),
+                                       config=types.SimpleNamespace(motor_ids=[1, 2, 3]))
+    hand.collect_status()
+    volt, errors = hand.take_status()
+    ok = errors.tolist() == [0x20, 0, 0] and np.allclose(volt, [11.8, 11.9, 12.0]) and hand.take_status()[1].sum() == 0
+    results.append(check("controller servo status", ok, f"voltages {volt.tolist()}, status {errors.tolist()}"))
+
+    # node logs: a restarted node appends; empty session folders are removed, others kept
+    procs = Processes(tmp / "logs")
+    for word in ("first", "second"):
+        procs.start("x", ["echo", word])
+        time.sleep(0.3)
+        procs.stop("x")
+    log = (tmp / "logs/x.log").read_text()
+    kept = []
+    for name, new_folder, failed, run in [("empty", True, False, False), ("failed", True, True, False),
+                                          ("has_run", True, False, True), ("continued", False, False, False)]:
+        (tmp / name / "node_logs").mkdir(parents=True)
+        if run:
+            (tmp / name / "51_bison_1600").mkdir()
+        ev.remove_if_empty(tmp / name, new_folder, failed)
+        kept.append((tmp / name).exists())
+    ok = "first" in log and "second" in log and kept == [False, True, True, True]
+    results.append(check("logs and empty sessions", ok, "restart appends; only the empty new session removed"))
+    return results
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 """The live view and the video frame: the camera image with the detected cube drawn into it and a status panel."""
 
+import threading
+import time
 from dataclasses import dataclass, field
 
 import cv2
@@ -51,26 +53,51 @@ def _text(img, text, xy, color, scale=0.6, thickness=1):
 
 
 class VideoRecorder:
-    """Writes frames in real time: frames are repeated when they arrive slower than fps."""
+    """Writes the newest frame in real time from its own thread: frames are repeated when they arrive slower than fps.
+
+    write() only hands over the frame, so encoding never delays the ROS callbacks (it did: a late frame was written
+    several times to catch up, which made the next one later still). Only the thread touches the cv2.VideoWriter."""
+
+    MAX_CATCH_UP = 10  # frames written at once after a delay; the rest are skipped
 
     def __init__(self, path, fps=20.0):
         self.path, self.fps = str(path), fps
-        self.writer, self.t0, self.frames = None, None, 0
+        self.frames = 0
+        self._frame = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
-    def write(self, frame, now):
-        if self.writer is None:
-            h, w = frame.shape[:2]
-            self.writer = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h))
-            self.t0 = now
-        due = int((now - self.t0) * self.fps) + 1
-        while self.frames < due:
-            self.writer.write(frame)
-            self.frames += 1
+    def write(self, frame):
+        with self._lock:
+            self._frame = frame
+
+    def _loop(self):
+        writer, t0 = None, None
+        try:
+            while not self._stop.wait(0.5 / self.fps):
+                with self._lock:
+                    frame = self._frame
+                if frame is None:
+                    continue
+                if writer is None:
+                    h, w = frame.shape[:2]
+                    writer = cv2.VideoWriter(self.path, cv2.VideoWriter_fourcc(*"mp4v"), self.fps, (w, h))
+                    t0 = time.time()
+                due = int((time.time() - t0) * self.fps) + 1
+                if due - self.frames > self.MAX_CATCH_UP:
+                    self.frames = due - self.MAX_CATCH_UP
+                while self.frames < due:
+                    writer.write(frame)
+                    self.frames += 1
+        finally:
+            if writer is not None:
+                writer.release()
 
     def close(self):
-        if self.writer is not None:
-            self.writer.release()
-            self.writer = None
+        self._stop.set()
+        self._thread.join(timeout=10)
 
 
 def temperature_color(temp, start_temp, abort_temp):

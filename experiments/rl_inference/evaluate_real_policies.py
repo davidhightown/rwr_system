@@ -19,22 +19,27 @@ off: the light cube stays in the open palm and the motors cool down. A run
 3. counts the cube's turns from the detected pose (real_eval/cube_tracking.py),
 4. stops after --duration seconds, when the cube falls, when it is not detected for --lost-timeout seconds, when a motor
    reaches --abort-temp, when the camera, the hand controller or the policy node stops, or when you press Enter,
-5. moves the hand back to the start pose, switches the torque off and asks whether to save the result.
+5. moves the hand back to the start pose, switches the torque off and asks whether to save the result. "Save and
+   start the next model" starts the next model by itself (step 1), without a second Enter.
 
 A stopped camera or hand controller is restarted before the next run.
 
-Results: <out>/results.csv (one row per run, also the ones not saved), <out>/summary.md (the saved ones) and per run a
-folder with video.mp4 (the live view), turns_vs_time.png, joints.png, trace.csv (cube poses), joints.csv (commanded and
-measured joints, 100 Hz), joint_tracking.csv (delay and error per joint), temperatures.csv, meta.json (model, file hash,
-options, git commit, start temperatures, result), policy_log.csv and policy_node.log. --out with an earlier folder
-continues it: models with a saved result there are skipped.
+Results: <out>/results.csv (one row per run, also the ones not saved), <out>/summary.md (the saved ones),
+<models-dir>/all_results.csv (the saved runs of all sessions) and per run a folder with video.mp4 (the live view),
+turns_vs_time.png, joints.png, trace.csv (cube poses), joints.csv (commanded and measured joints and motor currents,
+100 Hz), joint_tracking.csv (delay, error and current per joint), temperatures.csv, motor_status.csv (supply voltage and
+servo status bits), meta.json (model, file hash, options, git commit, start temperatures, result), policy_log.csv and
+policy_node.log. <out>/code_changes_<time>.diff holds the uncommitted code changes. --out with an earlier folder
+continues it: models with a saved result there are skipped, except the ones named with --models.
 """
 
 import argparse
 import csv
+import faulthandler
 import json
 import os
 import select
+import shutil
 import signal
 import sys
 import termios
@@ -46,6 +51,7 @@ from pathlib import Path
 
 import numpy as np
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,9 +59,11 @@ from real_eval.analysis import (joint_summary, joint_tracking, plot_run, progres
                                 quality_warnings)
 from real_eval.cube_tracking import DropMonitor, TurnCounter, resting_position  # noqa: E402
 from real_eval.live_view import ViewState, VideoRecorder, render  # noqa: E402
-from real_eval.processes import Processes, wait_or_fail  # noqa: E402
+from real_eval.processes import Processes, find_leftovers, stop_pids, wait_or_fail  # noqa: E402
 from real_eval.ros_interface import RosInterface  # noqa: E402
 from real_eval.run_info import session_info, update_meta_result, write_meta  # noqa: E402
+
+faulthandler.enable()  # a crash in a C library prints the Python stack of every thread
 
 WS = Path(__file__).resolve().parents[4]  # ros_ws
 REPO = Path(__file__).resolve().parents[2]  # rwr_system
@@ -66,6 +74,25 @@ CUBE_EDGE = 0.045  # m, as cube_edge_length of the cube detector
 # outcomes that say nothing about the policy: the run is repeated
 INTERRUPTED = ("not started", "overheated", "aborted", "camera lost", "controller lost", "policy failed")
 STALE_S = {"image": 3.0, "joints": 2.0}  # no camera image / joint position for this long = the node stopped
+
+
+# the status byte of the Feetech servos (orca_core feetech_client.hardware_error_bits)
+SERVO_ERROR_BITS = ((0x01, "input_voltage"), (0x02, "angle_sensor"), (0x04, "overheating"), (0x08, "overcurrent"),
+                    (0x20, "overload"))
+
+
+def servo_error_names(byte: int) -> list[str]:
+    names = [name for bit, name in SERVO_ERROR_BITS if byte & bit]
+    rest = byte & ~sum(bit for bit, _ in SERVO_ERROR_BITS)
+    return names + ([f"0x{rest:02X}"] if rest else [])
+
+
+class RunInterrupted(KeyboardInterrupt):
+    """Ctrl+C during a run: the run was finished (hand parked, files written); its result is saved, then we stop."""
+
+    def __init__(self, result):
+        super().__init__()
+        self.result = result
 
 
 class Evaluation:
@@ -87,6 +114,10 @@ class Evaluation:
         self.ros.on_tick = self._on_tick
         self.processes = None
         self.hand_ready = False
+        # during a run: hottest temperature, motor status once per second, servo faults until the hand parks
+        self._temp_max = 0.0
+        self.motor_status = []  # (time, voltages or None, status bytes or None)
+        self._run_errors = None
         self.session = None
 
     # -- callbacks from the ROS thread
@@ -116,19 +147,35 @@ class Evaluation:
         self.ros.publish_view(frame)
         recorder = self.recorder
         if recorder is not None:
-            recorder.write(frame, now)
+            recorder.write(frame)
 
     # -- the nodes: start, watch, restart
     def launch(self, out: Path):
         self.processes = Processes(out / "node_logs")
-        self.session = session_info(self.args, REPO, HAND_CONFIG)
+        self.session = session_info(self.args, REPO, HAND_CONFIG, out)
         if self.args.no_launch:
             return
+        self._stop_leftovers()
         self._start_camera()
         if not self.args.no_viewer:
             self.processes.start("viewer", ["ros2", "run", "rqt_image_view", "rqt_image_view", "/real_eval/view"])
         if self.need_hand:
             self._start_hand()
+
+    def _stop_leftovers(self):
+        """Nodes of an earlier session that still run hold the camera and the motor port: offer to stop them."""
+        leftovers = find_leftovers()
+        if not leftovers:
+            return
+        print("These nodes still run (from an earlier session, or started in another terminal):")
+        for pid, cmd in sorted(leftovers.items()):
+            print(f"  {pid:7d}  {cmd[:150]}")
+        if ask("Stop them? (a hand controller started with the evaluation switches the torque off) "
+               "[Enter = stop them, q = quit] ", "", "q") == "q":
+            raise KeyboardInterrupt
+        if not stop_pids(leftovers):
+            raise RuntimeError("could not stop the old nodes: " + ", ".join(map(str, find_leftovers())))
+        print("Stopped.")
 
     def _start_camera(self):
         a = self.args
@@ -153,7 +200,8 @@ class Evaluation:
         time.sleep(5)
         self.processes.start("hand", ["ros2", "launch", "hand_control", "orcahand_v2_controller_launch.yaml",
                                       "hand_chirality:=right", "launch_rviz:=false",
-                                      f"neutral_wrist_deg:={self.args.start_wrist_deg}"])
+                                      f"neutral_wrist_deg:={self.args.start_wrist_deg}",
+                                      "torque_off_on_exit:=true"])  # also when this script crashes
 
     def prepare_hand(self):
         self.ros.wait_for("joint positions from the hand controller", lambda: self.ros.ages()["joints"] < 1.0, 60)
@@ -211,30 +259,34 @@ class Evaluation:
             if time.time() - last_print > 30:
                 last_print = time.time()
                 print(f"  {self.view.phase}" if temp is not None else "  waiting for motor temperatures")
-            time.sleep(1.0)
+            time.sleep(0.1)  # the temperatures arrive once per second: start right after the first one below the limit
 
     def wait_until_cube_rests(self, timeout=15.0):
         self.view.phase = "waiting for the cube to lie still in the palm"
         t0 = time.time()
         while time.time() - t0 < timeout:
-            time.sleep(0.5)
             age = self.ros.pose_age()
             samples = list(self.trail)[-15:] if age is not None and age < 0.3 else []
             rest = resting_position(samples)
             if rest is not None:
                 return rest
+            time.sleep(0.1)
         return None
 
     def run(self, model, speed, run_dir: Path) -> dict:
         a = self.args
+        ctrl_c = False
+        self._temp_max = 0.0
         name = f"{model['idx']:02d}_{model['name']}"
         result = dict(time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), model=name, goal_ang_vel=speed,
                       outcome="not started", stop_reason="", duration_s=0.0, turns=0.0, speed_along_cmd=0.0,
                       turns_30s="", best_10s_rad_per_s="", longest_stall_s="", turns_camera_axis=0.0,
                       spin_axis_tilt_deg=0.0, tracked_fraction=0.0, poses_per_s=0.0, rejected_poses=0.0,
                       longest_gap_s=0.0, dropped=False, median_lag_ms="", worst_joint="", worst_joint_error_deg="",
-                      stuck_joints="", start_temp_max=0.0, run_temp_max=0.0, hottest_joint="", warnings="", valid="",
-                      exposure_us=a.exposure_us, run_dir=str(run_dir))
+                      stuck_joints="", total_current_a="", highest_current_joint="", start_temp_max=0.0,
+                      run_temp_max=0.0, hottest_joint="", warnings="", valid="", min_voltage_v="", servo_errors="",
+                      servo_errors_parking="", temperature_glitches=0, note=a.note, exposure_us=a.exposure_us,
+                      run_dir=str(run_dir))
         with self.ros.lock:
             temps = None if self.ros.temps is None else self.ros.temps.copy()
         start_temps = {} if temps is None else {j: round(float(t), 1) for j, t in zip(self.joint_ids, temps)}
@@ -253,6 +305,7 @@ class Evaluation:
                               max_tilt_deg=a.max_tilt_deg)
         drops = DropMonitor(rest, a.drop_dist, a.drop_confirm)
         temperatures = []
+        self._run_errors, self.motor_status = None, []
         t0 = t_end = time.time()
         self.view.phase = "starting the policy"
         self.ros.set_torque(True)
@@ -271,43 +324,14 @@ class Evaluation:
             print("  running; Enter = stop this run")
             t0 = time.time()
             self.counter = counter
-            temp_max, last_temp_log = result["start_temp_max"], 0.0
-            while True:
-                time.sleep(0.05)
-                now = time.time()
-                self.view.phase = f"RUNNING {now - t0:4.1f} / {a.duration:.0f} s   goal {speed:+.1f} rad/s   (Enter = stop)"
-                temp, joint = self.ros.hottest()
-                if temp is not None:
-                    temp_max = max(temp_max, temp)
-                    if now - last_temp_log >= 1.0:
-                        last_temp_log = now
-                        with self.ros.lock:
-                            temperatures.append([now - t0, *self.ros.temps.tolist()])
-                age = self.ros.pose_age()
-                problem = self.problem()
-                if problem:
-                    result["stop_reason"] = f"the {problem} stopped"
-                    result["outcome"] = "camera lost" if problem == "camera" else "controller lost"
-                elif not self.processes.alive("policy"):
-                    result["stop_reason"], result["outcome"] = "the policy node exited", "policy failed"
-                elif enter_pressed():
-                    result["stop_reason"], result["outcome"] = "stopped by you", "aborted"
-                elif temp is not None and temp >= a.abort_temp:
-                    result["stop_reason"] = f"{self.joint_ids[joint]} reached {temp:.0f} C"
-                    result["outcome"] = "overheated"
-                elif drops.update(now, counter):
-                    result["stop_reason"], result["dropped"], result["outcome"] = "dropped", True, "dropped"
-                elif age is None or age > a.lost_timeout:
-                    result["stop_reason"] = f"cube not detected for {a.lost_timeout:.0f} s"
-                    result["outcome"] = "lost"
-                    result["dropped"] = drops.distance > a.drop_dist / 2
-                elif now - t0 >= a.duration:
-                    result["stop_reason"], result["outcome"] = "time", "completed"
-                if result["stop_reason"]:
-                    break
+            try:
+                self._run_loop(result, counter, drops, temperatures, speed, t0)
+            except KeyboardInterrupt:
+                result["stop_reason"], result["outcome"], ctrl_c = "Ctrl+C", "aborted", True
+                signal.signal(signal.SIGINT, signal.SIG_IGN)  # finish the run (park, files) without a second one
             t_end = time.time()
             self.counter = None
-            result.update(self._measure(counter, speed, t0, t_end, temp_max))
+            result.update(self._measure(counter, speed, t0, t_end, self._temp_max))
 
         joint_log = self.ros.stop_joint_log()
         self.view.phase = f"stopped: {result['stop_reason']}"
@@ -318,6 +342,8 @@ class Evaluation:
         time.sleep(1.0)
         self.recorder.close()
         self.recorder = None
+        with self.ros.lock:  # the servo faults of the run (status bytes arrive once per second: after the 1 s above)
+            self._run_errors = None if self.ros.status_errors is None else self.ros.status_errors.copy()
         if result["outcome"] != "controller lost":
             self.view.phase = "back to the start pose"
             try:
@@ -327,6 +353,8 @@ class Evaluation:
                 print(f"  could not park the hand: {e}")
         self.view.rest_position = None
 
+        result.update(self._motor_status_summary())
+        result["temperature_glitches"] = self.ros.temp_glitches
         run_log = [row for row in joint_log if row[0] >= t0]
         tracking = joint_tracking(run_log, self.joint_ids)
         result.update(joint_summary(tracking))
@@ -342,7 +370,69 @@ class Evaluation:
         except Exception as e:  # a plot must not stop the evaluation
             print(f"  could not plot the run: {e}")
         update_meta_result(run_dir, result)
+        if ctrl_c:
+            signal.signal(signal.SIGINT, _interrupt)
+            raise RunInterrupted(result)
         return result
+
+    def _run_loop(self, result, counter, drops, temperatures, speed, t0):
+        """Watch the run until a stop reason is set in result; the hottest temperature ends in self._temp_max."""
+        a = self.args
+        self._temp_max, last_temp_log = result["start_temp_max"], 0.0
+        while True:
+            time.sleep(0.05)
+            now = time.time()
+            self.view.phase = f"RUNNING {now - t0:4.1f} / {a.duration:.0f} s   goal {speed:+.1f} rad/s   (Enter = stop)"
+            temp, joint = self.ros.hottest()
+            if temp is not None:
+                self._temp_max = max(self._temp_max, temp)
+                if now - last_temp_log >= 1.0:
+                    last_temp_log = now
+                    with self.ros.lock:
+                        temperatures.append([now - t0, *self.ros.temps.tolist()])
+                        volt, errors = self.ros.voltage, self.ros.status_errors
+                        self.motor_status.append((now - t0, None if volt is None else volt.copy(),
+                                                  None if errors is None else errors.copy()))
+            age = self.ros.pose_age()
+            problem = self.problem()
+            if problem:
+                result["stop_reason"] = f"the {problem} stopped"
+                result["outcome"] = "camera lost" if problem == "camera" else "controller lost"
+            elif not self.processes.alive("policy"):
+                result["stop_reason"], result["outcome"] = "the policy node exited", "policy failed"
+            elif enter_pressed():
+                result["stop_reason"], result["outcome"] = "stopped by you", "aborted"
+            elif temp is not None and temp >= a.abort_temp:
+                result["stop_reason"] = f"{self.joint_ids[joint]} reached {temp:.0f} C"
+                result["outcome"] = "overheated"
+            elif drops.update(now, counter):
+                result["stop_reason"], result["dropped"], result["outcome"] = "dropped", True, "dropped"
+            elif age is None or age > a.lost_timeout:
+                result["stop_reason"] = f"cube not detected for {a.lost_timeout:.0f} s"
+                result["outcome"] = "lost"
+                result["dropped"] = drops.distance > a.drop_dist / 2
+            elif now - t0 >= a.duration:
+                result["stop_reason"], result["outcome"] = "time", "completed"
+            if result["stop_reason"]:
+                break
+
+    def _motor_status_summary(self) -> dict:
+        """results.csv fields: lowest supply voltage during the run, servo faults (status bits) per joint during the
+        run, and the ones that appeared only while the hand moved back to the start pose afterwards."""
+        with self.ros.lock:
+            all_errors = None if self.ros.status_errors is None else self.ros.status_errors.copy()
+        run_errors = self._run_errors
+        volts = [v for _, v, _ in self.motor_status if v is not None]
+        out = dict(min_voltage_v=round(float(np.nanmin(volts)), 1) if volts else "")
+
+        def names(errors):
+            return "; ".join(f"{j}: {'+'.join(servo_error_names(e))}" for j, e in zip(self.joint_ids, errors) if e)
+
+        if run_errors is not None:
+            out["servo_errors"] = names(run_errors)
+        if all_errors is not None:
+            out["servo_errors_parking"] = names(all_errors & ~run_errors if run_errors is not None else all_errors)
+        return out
 
     def _measure(self, counter, speed, t0, t_end, temp_max) -> dict:
         duration = t_end - t0
@@ -374,11 +464,22 @@ class Evaluation:
             w = csv.writer(f)
             w.writerow(["time_s", *self.joint_ids])
             w.writerows([[round(v, 1) for v in row] for row in temperatures])
+        with open(run_dir / "motor_status.csv", "w", newline="") as f:  # supply voltage, status bytes since the start
+            w = csv.writer(f)
+            w.writerow(["time_s", *[f"voltage_v_{j}" for j in self.joint_ids],
+                        *[f"errors_{j}" for j in self.joint_ids]])
+            n = len(self.joint_ids)
+            for t, volt, err in self.motor_status:
+                w.writerow([round(t, 1), *(np.round(volt, 1) if volt is not None else [""] * n),
+                            *(err.tolist() if err is not None else [""] * n)])
         with open(run_dir / "joints.csv", "w", newline="") as f:  # degrees, time from the start of the run
             w = csv.writer(f)
-            w.writerow(["time_s", *[f"cmd_{j}" for j in self.joint_ids], *[f"meas_{j}" for j in self.joint_ids]])
-            for t, cmd, meas in joint_log:
-                w.writerow([f"{t - t0:.3f}", *np.round(np.degrees(cmd), 2), *np.round(np.degrees(meas), 2)])
+            w.writerow(["time_s", *[f"cmd_{j}" for j in self.joint_ids], *[f"meas_{j}" for j in self.joint_ids],
+                        *[f"current_ma_{j}" for j in self.joint_ids]])
+            for t, cmd, meas, *cur in joint_log:
+                cur = cur[0] if cur and cur[0] is not None else None
+                w.writerow([f"{t - t0:.3f}", *np.round(np.degrees(cmd), 2), *np.round(np.degrees(meas), 2),
+                            *(np.round(cur).astype(int) if cur is not None else [""] * len(self.joint_ids))])
         if tracking:
             with open(run_dir / "joint_tracking.csv", "w", newline="") as f:
                 w = csv.DictWriter(f, fieldnames=list(asdict(tracking[0])))
@@ -402,9 +503,17 @@ class Evaluation:
 
     def evaluate(self, models, out: Path):
         results_path = out / "results.csv"
+        try:
+            self._evaluate(models, out, results_path)
+        finally:  # also after Ctrl+C or an error
+            self._summary(results_path)
+
+    def _evaluate(self, models, out: Path, results_path: Path):
         done = set()
-        if results_path.exists():
+        # skip models already saved in this folder, but never the ones named with --models: those run again
+        if results_path.exists() and not self.args.models:
             done = {r["model"] for r in csv.DictReader(open(results_path)) if r.get("valid") == "yes"}
+        start_next = False  # after "save and next model": no second Enter, the next model starts when ready
         for model in models:
             name = f"{model['idx']:02d}_{model['name']}"
             if name in done:
@@ -414,7 +523,13 @@ class Evaluation:
             self.view.title = f"{name}   goal {speed:+.1f} rad/s"
             self.view.phase = "put the cube in the palm, then Enter in the terminal"
             print(f"\n=== {name}, goal {speed:+.2f} rad/s")
-            choice = ask("  Put the cube in the palm. Enter = start, n = next model, q = quit: ", "", "n", "q")
+            if start_next:
+                print("  starts once every motor is below the start temperature and the cube lies in the palm "
+                      "(Ctrl+C = stop)")
+                choice = ""
+            else:
+                choice = ask("  Put the cube in the palm. Enter = start, n = next model, q = quit: ", "", "n", "q")
+            start_next = False
             while choice == "":
                 self.ensure_running()
                 temp = self.wait_until_cool()  # starts by itself once every motor is below --start-temp
@@ -423,7 +538,14 @@ class Evaluation:
                 self.ensure_running()
                 print(f"  hottest motor {temp:.0f} C, starting")
                 run_dir = new_run_dir(out, name)
-                result = self.run(model, speed, run_dir)
+                try:
+                    result = self.run(model, speed, run_dir)
+                except RunInterrupted as e:
+                    self._report(e.result)
+                    e.result["valid"] = "no"
+                    self._save(results_path, e.result)
+                    print(f"  not saved as a result (row in {results_path.name}, files in {run_dir.name})")
+                    raise
                 self._report(result)
                 self.view.phase = "Enter in the terminal: save / run again / next model"
                 if result["outcome"] in INTERRUPTED:
@@ -434,18 +556,21 @@ class Evaluation:
                                  f"(starts once every motor is below {self.args.start_temp:.0f} C), n = next model, "
                                  f"q = quit: ", "", "n", "q")
                     continue
-                choice = ask("  Enter = save and next model, r = run again, n = next model without saving, "
+                choice = ask("  Enter = save and start the next model, r = run again, n = next model without saving, "
                              "q = quit: ", "", "r", "n", "q")
-                result["valid"] = "yes" if choice == "" else "no"
+                keep = choice == ""
+                if choice == "q":
+                    keep = ask("  Save this run before quitting? Enter = save, n = do not save: ", "", "n") == ""
+                result["valid"] = "yes" if keep else "no"
                 self._save(results_path, result)
                 if choice == "r":
                     print("  Put the cube back in the palm; starting again.")
                     choice = ""
                 else:
+                    start_next = choice == ""
                     choice = "n" if choice == "" else choice
             if choice == "q":
                 break
-        self._summary(results_path)
 
     @staticmethod
     def _report(r):
@@ -463,23 +588,12 @@ class Evaluation:
         if r["warnings"]:
             print(f"  WARNING, the count may be wrong: {r['warnings']}. Consider r = run again.")
 
-    @staticmethod
-    def _save(path, result):
+    def _save(self, path, result):
+        """The run's row in the session's results.csv; a saved run also goes into all_results.csv of --models-dir."""
         update_meta_result(Path(result["run_dir"]), result)
-        new = not path.exists()
-        fields = list(result) if new else next(csv.reader(open(path)))
-        if not new and set(result) - set(fields):  # a results.csv of an older version: add the new columns
-            rows = list(csv.DictReader(open(path)))
-            fields += [k for k in result if k not in fields]
-            with open(path, "w", newline="") as f:
-                w = csv.DictWriter(f, fieldnames=fields, restval="")
-                w.writeheader()
-                w.writerows(rows)
-        with open(path, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", restval="")
-            if new:
-                w.writeheader()
-            w.writerow(result)
+        append_row(path, result)
+        if result.get("valid") == "yes":
+            append_row(Path(self.args.models_dir) / "all_results.csv", dict(session=path.parent.name) | result)
 
     @staticmethod
     def _summary(path):
@@ -490,8 +604,9 @@ class Evaluation:
         cols = [("model", "model"), ("goal (rad/s)", "goal_ang_vel"), ("turns", "turns"), ("rad/s", "speed_along_cmd"),
                 ("turns 30 s", "turns_30s"), ("best 10 s (rad/s)", "best_10s_rad_per_s"),
                 ("longest stall (s)", "longest_stall_s"), ("duration (s)", "duration_s"), ("outcome", "outcome"),
-                ("tracked", "tracked_fraction"), ("joint delay (ms)", "median_lag_ms"), ("barely moving", "stuck_joints"),
-                ("max temp (C)", "run_temp_max"), ("warnings", "warnings")]
+                ("tracked", "tracked_fraction"), ("joint delay (ms)", "median_lag_ms"),
+                ("current (A)", "total_current_a"), ("barely moving", "stuck_joints"), ("max temp (C)", "run_temp_max"),
+                ("min voltage (V)", "min_voltage_v"), ("servo errors", "servo_errors"), ("warnings", "warnings")]
         lines = ["| " + " | ".join(c for c, _ in cols) + " |", "|" + "---|" * len(cols)]
         lines += ["| " + " | ".join(str(r.get(k, "")) for _, k in cols) + " |" for r in rows]
         (path.parent / "summary.md").write_text("\n".join(lines) + "\n")
@@ -501,6 +616,7 @@ class Evaluation:
         # a second Ctrl+C (or the signal reaching both pixi and this process) must not interrupt the clean-up
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
         if self.processes is not None:
             self.processes.stop("policy")
         if self.recorder is not None:
@@ -516,15 +632,35 @@ class Evaluation:
             self.processes.stop_all()
 
 
+def append_row(path: Path, row: dict):
+    """Append a row to a CSV file; new columns (a file of an older version) are added to the header."""
+    new = not path.exists()
+    fields = list(row) if new else next(csv.reader(open(path)))
+    if not new and set(row) - set(fields):  # a file of an older version: add the new columns
+        rows = list(csv.DictReader(open(path)))
+        fields += [k for k in row if k not in fields]
+        with open(path, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields, restval="")
+            w.writeheader()
+            w.writerows(rows)
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore", restval="")
+        if new:
+            w.writeheader()
+        w.writerow(row)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--models", nargs="*", help="Numbers (e.g. 06) or names; default: all, newest first.")
+    p.add_argument("--models", nargs="*", help="Numbers (e.g. 06) or names, run in this order; default: all, newest "
+                   "trained first. Named models run even when --out already has a saved result for them (a second "
+                   "saved row is added).")
     p.add_argument("--oldest-first", action="store_true")
     p.add_argument("--models-dir", default=os.path.expanduser("~/policies/real_test"))
     p.add_argument("--speed", type=float, help="Commanded speed (rad/s, sign = direction) for every model; default: "
                    "each model's own test speed.")
     p.add_argument("--duration", type=float, default=60.0, help="Seconds per run.")
-    p.add_argument("--start-temp", type=float, default=50.0, help="Start a run only when every motor is below this (C).")
+    p.add_argument("--start-temp", type=float, default=42.0, help="Start a run only when every motor is below this (C).")
     p.add_argument("--abort-temp", type=float, default=58.0, help="Stop a run when a motor reaches this (C).")
     p.add_argument("--start-wrist-deg", type=float, default=30.0, help="Wrist angle of the start pose.")
     p.add_argument("--drop-dist", type=float, default=0.06, help="Cube this far from where it rested = fallen (m).")
@@ -541,6 +677,8 @@ def parse_args():
     p.add_argument("--camera-id", default="", help="OAK-D ID (mxid) to use; default: the one in "
                    "experiments/cfgs/cams/oakd_cube_task.yaml, or the only connected OAK-D.")
     p.add_argument("--iso", type=int, default=0, help="Camera sensitivity (100-1600) with --exposure-us; 0: 800.")
+    p.add_argument("--note", default="", help="Free text saved with every run of this session: cube, setup, "
+                   "what changed (e.g. \"new 45 mm cube, re-calibrated thumb\").")
     p.add_argument("--out", help="Results folder; default: <models-dir>/eval_<date_time>. An earlier folder continues.")
     p.add_argument("--live", action="store_true", help="Only show the turn count while you turn the cube by hand.")
     p.add_argument("--pose-only", action="store_true", help="Only move the hand to the start pose, then exit.")
@@ -552,11 +690,13 @@ def parse_args():
 def load_models(args):
     models = json.load(open(Path(args.models_dir) / "models.json"))
     if args.models:
-        wanted = set(args.models)
-        models = [m for m in models if f"{m['idx']:02d}" in wanted or m["name"] in wanted]
-        missing = wanted - {f"{m['idx']:02d}" for m in models} - {m["name"] for m in models}
+        # in the order given on the command line; "9" and "09" both mean model 09
+        by_key = {f"{m['idx']:02d}": m for m in models} | {m["name"]: m for m in models}
+        keys = [f"{int(k):02d}" if k.isdigit() else k for k in args.models]
+        missing = [k for k in keys if k not in by_key]
         if missing:
-            raise SystemExit(f"unknown models: {sorted(missing)}")
+            raise SystemExit(f"unknown models: {missing}")
+        models = list({id(by_key[k]): by_key[k] for k in keys}.values())  # without repeats
     return models[::-1] if args.oldest_first else models
 
 
@@ -600,14 +740,26 @@ def _interrupt(*_):
     raise KeyboardInterrupt
 
 
+def _hangup(*_):
+    """The terminal was closed: clean up like Ctrl+C, without writing to the terminal that is gone."""
+    devnull = open(os.devnull, "w")
+    sys.stdout = sys.stderr = devnull
+    raise KeyboardInterrupt
+
+
 def main():
     args = parse_args()
     models = [] if args.live or args.pose_only else load_models(args)
     out = Path(args.out) if args.out else Path(args.models_dir) / f"eval_{datetime.now():%Y%m%d_%H%M%S}"
+    new_folder = not out.exists()
     out.mkdir(parents=True, exist_ok=True)
-    signal.signal(signal.SIGTERM, _interrupt)  # closing the terminal stops like Ctrl+C
+    failed = False
+    signal.signal(signal.SIGTERM, _interrupt)  # kill stops like Ctrl+C
+    signal.signal(signal.SIGHUP, _hangup)  # closing the terminal, too
 
-    rclpy.init()
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # rclpy's handlers stop the executor on Ctrl+C:
+    # the hand could then not be parked (no answer from the torque service). The handlers here raise
+    # KeyboardInterrupt in the main thread, and shutdown() parks the hand while ROS still runs.
     ev = Evaluation(args, need_hand=not args.live)
     ev.ros.start()
     try:
@@ -624,10 +776,20 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     except RuntimeError as e:
+        failed = True
         print(f"\nError: {e}")
     finally:
         ev.shutdown()
         rclpy.try_shutdown()
+        remove_if_empty(out, new_folder, failed)
+
+
+def remove_if_empty(out: Path, new_folder: bool, failed: bool):
+    """A new session folder without any run is deleted, unless an error stopped it (its node logs say why)."""
+    if not new_folder or failed or not out.exists() or any(p.is_dir() and p.name[:2].isdigit() for p in out.iterdir()):
+        return
+    shutil.rmtree(out, ignore_errors=True)
+    print(f"No run in this session: removed {out}")
 
 
 if __name__ == "__main__":

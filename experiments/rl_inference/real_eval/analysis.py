@@ -42,10 +42,12 @@ class JointTracking:
     lag_ms: float | None  # delay that best explains the measured motion from the command, None for a still joint
     rms_error_at_lag_deg: float  # what remains after the delay: offset, too little or too much motion
     follows: float  # measured range / command range: well below 1 = the joint does not reach its commands
+    mean_abs_current_ma: float | None = None  # effort and heating: mean of |present current|
+    p95_abs_current_ma: float | None = None  # 95th percentile of |present current|: how hard the joint pushes
 
 
 def joint_tracking(log, joint_names, rate_hz=100.0) -> list[JointTracking]:
-    """log: [(time, command, measured)] (rad, the hand controller's joint order)."""
+    """log: [(time, command, measured[, current])] (rad, mA, the hand controller's joint order)."""
     if len(log) < 50:
         return []
     t = np.array([row[0] for row in log])
@@ -76,18 +78,31 @@ def joint_tracking(log, joint_names, rate_hz=100.0) -> list[JointTracking]:
             rms_lag = float(np.sqrt(np.mean((m[k:] - c[:len(c) - k]) ** 2)))
         out.append(JointTracking(name, round(c_range, 1), round(m_range, 1), round(rms, 1), lag, round(rms_lag, 1),
                                  round(m_range / c_range, 2) if c_range >= 2.0 else 1.0))
+    currents = [row[3] for row in log if len(row) > 3 and row[3] is not None and len(row[3]) == len(joint_names)]
+    if len(currents) >= 50:
+        cur = np.abs(np.array(currents))
+        for j, jt in enumerate(out):
+            jt.mean_abs_current_ma = round(float(np.mean(cur[:, j])))
+            jt.p95_abs_current_ma = round(float(np.percentile(cur[:, j], 95)))
     return out
 
 
 def joint_summary(tracking: list[JointTracking]) -> dict:
     """The results.csv fields: median delay, the joint that follows worst, joints that barely move."""
     if not tracking:
-        return dict(median_lag_ms="", worst_joint="", worst_joint_error_deg="", stuck_joints="")
+        return dict(median_lag_ms="", worst_joint="", worst_joint_error_deg="", stuck_joints="", total_current_a="",
+                    highest_current_joint="")
     lags = [j.lag_ms for j in tracking if j.lag_ms is not None]
     worst = max(tracking, key=lambda j: j.rms_error_at_lag_deg)
     stuck = [j.name for j in tracking if j.command_range_deg >= 5.0 and j.follows < 0.5]
+    with_current = [j for j in tracking if j.mean_abs_current_ma is not None]
     return dict(median_lag_ms=round(float(np.median(lags))) if lags else "", worst_joint=worst.name,
-                worst_joint_error_deg=worst.rms_error_at_lag_deg, stuck_joints=" ".join(stuck))
+                worst_joint_error_deg=worst.rms_error_at_lag_deg, stuck_joints=" ".join(stuck),
+                # sum over the joints of the mean |current|: compares the effort (and heating) of the policies
+                total_current_a=round(sum(j.mean_abs_current_ma for j in with_current) / 1000.0, 2)
+                if with_current else "",
+                highest_current_joint=max(with_current, key=lambda j: j.mean_abs_current_ma).name
+                if with_current else "")
 
 
 # -- trust

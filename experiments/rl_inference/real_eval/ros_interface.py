@@ -9,16 +9,21 @@ import numpy as np
 import tf2_ros
 from cv_bridge import CvBridge
 from ingress.msg import CameraIntrinsics
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from scipy.spatial.transform import Rotation
 from sensor_msgs.msg import Image
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Int32MultiArray
 from std_srvs.srv import SetBool
 
 TICK_HZ = 20.0
+# a motor temperature that jumps more than this from one reading (1 s) to the next, or lies outside 0..100 C, is a bad
+# reading (the wrist servo sent 150 C and 58 C while at 30 C, which stopped runs as "overheated"). Real heating is
+# about 1 C/s; a new value that is read twice in a row is accepted.
+TEMP_JUMP_C = 15.0
 
 
 class RosInterface(Node):
@@ -34,9 +39,14 @@ class RosInterface(Node):
         self.image, self.image_time = None, 0.0
         self.K, self.dist = None, None
         self.temps, self.temps_time = None, 0.0
+        self._temp_pending = None  # per motor: a jumped reading waiting for confirmation, nan if none
+        self.temp_glitches = 0  # bad temperature readings ignored since start_joint_log()
         self.joint_pos, self.joint_time = None, 0.0
+        self.voltage = None  # latest supply voltage per motor (V, joint order), once per second
+        self.status_errors = None  # servo status bytes OR-ed since start_joint_log() (joint order), None: not published
+        self.current = None  # latest motor currents (mA, joint order), None if the controller does not publish them
         self.command = None  # latest joint command of the policy (rad, the hand controller's joint order)
-        self.joint_log = None  # list of (time, command, measured) while recording
+        self.joint_log = None  # list of (time, command, measured, current or None) while recording
         self.pose = None  # (time, position, rotation) of the latest detection
         self._pose_stamp = None
         self.detection_times = deque(maxlen=200)
@@ -46,22 +56,36 @@ class RosInterface(Node):
         self._own_commands = False
         self.torque_on = None  # unknown until set
 
-        self.create_subscription(Image, camera_topic, self._image_cb, qos_profile_sensor_data)
+        # separate callback groups: the default group runs one callback at a time, and the view/video tick then
+        # delayed the 100 Hz joint positions by up to 2 s (dropped messages, a false "controller lost")
+        hand_group = ReentrantCallbackGroup()  # joints, temperatures, commands, torque service: short callbacks
+        image_group, tick_group = MutuallyExclusiveCallbackGroup(), MutuallyExclusiveCallbackGroup()
+        self.create_subscription(Image, camera_topic, self._image_cb, qos_profile_sensor_data,
+                                 callback_group=image_group)
         self.create_subscription(CameraIntrinsics, camera_topic.replace("color", "intrinsics"), self._intrinsics_cb,
                                  QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
-                                            durability=DurabilityPolicy.TRANSIENT_LOCAL))
-        self.create_subscription(Float32MultiArray, f"/{hand}/hand/motor_temperature", self._temps_cb, 10)
-        self.create_subscription(Float32MultiArray, f"/{hand}/hand/joint_position_from_motor", self._joints_cb, 10)
-        self.create_subscription(Float32MultiArray, f"/{hand}/hand/policy_output", self._policy_cb, 10)
+                                            durability=DurabilityPolicy.TRANSIENT_LOCAL), callback_group=hand_group)
+        self.create_subscription(Float32MultiArray, f"/{hand}/hand/motor_temperature", self._temps_cb, 10,
+                                 callback_group=hand_group)
+        self.create_subscription(Float32MultiArray, f"/{hand}/hand/joint_position_from_motor", self._joints_cb, 100,
+                                 callback_group=hand_group)
+        self.create_subscription(Float32MultiArray, f"/{hand}/hand/policy_output", self._policy_cb, 100,
+                                 callback_group=hand_group)
+        self.create_subscription(Float32MultiArray, f"/{hand}/hand/motor_current", self._current_cb, 100,
+                                 callback_group=hand_group)
+        self.create_subscription(Float32MultiArray, f"/{hand}/hand/motor_voltage", self._voltage_cb, 10,
+                                 callback_group=hand_group)
+        self.create_subscription(Int32MultiArray, f"/{hand}/hand/motor_errors", self._errors_cb, 10,
+                                 callback_group=hand_group)
         self.command_pub = self.create_publisher(Float32MultiArray, f"/{hand}/hand/policy_output", 10)
         self.view_pub = self.create_publisher(Image, "/real_eval/view", 1)
-        self.torque_client = self.create_client(SetBool, f"/{hand}/hand/set_torque_enabled")
-        self.create_timer(1.0 / TICK_HZ, self._tick)
+        self.torque_client = self.create_client(SetBool, f"/{hand}/hand/set_torque_enabled", callback_group=hand_group)
+        self.create_timer(1.0 / TICK_HZ, self._tick, callback_group=tick_group)
         self._executor = None
 
     # -- life cycle
     def start(self):
-        self._executor = MultiThreadedExecutor()
+        self._executor = MultiThreadedExecutor(num_threads=4)
         self._executor.add_node(self)
         threading.Thread(target=self._executor.spin, daemon=True).start()
 
@@ -77,8 +101,19 @@ class RosInterface(Node):
             self.dist = np.array(msg.disto, dtype=np.float64)
 
     def _temps_cb(self, msg):
+        new = np.array(msg.data, dtype=np.float32)
         with self.lock:
-            self.temps, self.temps_time = np.array(msg.data, dtype=np.float32), time.time()
+            old = self.temps
+            if old is not None and len(old) == len(new):
+                if self._temp_pending is None or len(self._temp_pending) != len(new):
+                    self._temp_pending = np.full(len(new), np.nan, dtype=np.float32)
+                suspicious = (np.abs(new - old) > TEMP_JUMP_C) | (new < 0) | (new > 100)
+                confirmed = np.abs(new - self._temp_pending) <= 3.0  # the same jumped value again: real
+                reject = suspicious & ~confirmed
+                self._temp_pending = np.where(reject, new, np.nan).astype(np.float32)
+                self.temp_glitches += int(reject.sum())
+                new = np.where(reject, old, new)
+            self.temps, self.temps_time = new, time.time()
 
     def _joints_cb(self, msg):
         now = time.time()
@@ -86,7 +121,20 @@ class RosInterface(Node):
         with self.lock:
             self.joint_pos, self.joint_time = q, now
             if self.joint_log is not None and self.command is not None:
-                self.joint_log.append((now, self.command, q))
+                self.joint_log.append((now, self.command, q, self.current))
+
+    def _voltage_cb(self, msg):
+        with self.lock:
+            self.voltage = np.array(msg.data, dtype=np.float64)
+
+    def _errors_cb(self, msg):
+        errors = np.array(msg.data, dtype=np.int64)
+        with self.lock:
+            self.status_errors = errors if self.status_errors is None else self.status_errors | errors
+
+    def _current_cb(self, msg):
+        with self.lock:
+            self.current = np.array(msg.data, dtype=np.float64)
 
     def _policy_cb(self, msg):
         if not self._own_commands:
@@ -127,6 +175,9 @@ class RosInterface(Node):
     def start_joint_log(self):
         with self.lock:
             self.command, self.joint_log = None, []
+            self.temp_glitches = 0
+            if self.status_errors is not None:
+                self.status_errors = np.zeros_like(self.status_errors)
 
     def stop_joint_log(self):
         """[(time, command, measured)] at the rate of the joint positions (100 Hz) since start_joint_log()."""

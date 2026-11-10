@@ -108,9 +108,9 @@ The launch file also takes `use_cube_pose`, `goal_ang_vel` and `goal_flip_period
   {"idx": 6, "name": "wombat", "dir": "/home/me/policies/real_test/06_wombat", "goal": -1.0}
 ]
 ```
-- The models are tested in the order of the file (`--oldest-first` reverses it).
+- Without `--models`, the models are tested in the order of the file (`--oldest-first` reverses it).
 - `goal` is the commanded spin speed in rad/s; the sign is the direction. `--speed` uses one speed for all models.
-- `--models 06 koala` tests only these: the number is `idx` with two digits, or the `name`.
+- `--models 06 koala` tests only these, in this order: the number is `idx` (`6` or `06`), or the `name`.
 
 **2. Check the camera.** From the repository folder (`rwr_system`), run:
 ```bash
@@ -124,16 +124,19 @@ experiments/rl_inference/run_real_evaluation.sh
 ```
 **The hand moves after 5 s** to the start pose (the config's neutral pose with the wrist at `--start-wrist-deg`, 30 deg) and the torque is then switched off. `--pose-only` only does this and exits. For each model, the script then:
 
-1. asks `Put the cube in the palm. Enter = start, n = next model, q = quit`,
-2. waits until every motor is below 50 °C (`--start-temp`) and the cube lies still,
+1. asks `Put the cube in the palm. Enter = start, n = next model, q = quit` (not after `Enter = save and start the next model`: then the next model starts by itself),
+2. waits until every motor is below 42 °C (`--start-temp`) and the cube lies still,
 3. switches the torque on and runs the policy for 60 s (`--duration`). Press Enter to stop a run early. A run also ends when the cube falls, when it is not detected for 5 s, when a motor reaches 58 °C (`--abort-temp`), or when the camera, the hand controller or the policy stops. A stopped camera or hand controller is restarted,
-4. moves the hand back to the start pose, switches the torque off, prints the result and asks `Enter = save and next model, r = run again, n = next model without saving, q = quit`. After a run that was interrupted (stopped by you, too hot, camera, controller or policy stopped), it asks `Enter = run again, n = next model, q = quit` instead.
+4. moves the hand back to the start pose, switches the torque off, prints the result and asks `Enter = save and start the next model, r = run again, n = next model without saving, q = quit`. After a run that was interrupted (stopped by you, too hot, camera, controller or policy stopped), it asks `Enter = run again, n = next model, q = quit` instead.
 
-Ctrl+C at any time stops everything and leaves the hand in the start pose with the torque off.
+Ctrl+C at any time stops everything and leaves the hand in the start pose with the torque off; a run that Ctrl+C stops is still written (outcome `aborted`, not saved). Closing the terminal does the same. If the script crashes, every node it started gets Ctrl+C, and the hand controller (started with `torque_off_on_exit:=true`) switches the torque off as it exits. Nodes left over from an earlier session are listed at the start, with the offer to stop them.
 
-**Results** go to `<models-dir>/eval_<date_time>/`. To continue an evaluation later, pass that folder with `--out`: the models already saved there are skipped.
-- `results.csv` has one row per run (also the ones not saved), and `summary.md` has the saved runs. They list the turns (positive = counterclockwise seen from above, the direction of a positive `goal`), the mean speed, the turns after 30 s, the fastest 10 s, the longest time without progress, how much of the run the cube was tracked, the joints' delay and the joints that barely follow their commands, the highest motor temperature and warnings. A warning means the count may be wrong: the cube was tracked for less than half of the run (`--min-tracked`), it was not detected for more than 3 s (`--max-gap`), or many poses were rejected. Run such a run again with `r`.
-- Each run has its own folder: `video.mp4` (the live view), `turns_vs_time.png`, `joints.png` (commanded and measured angle of every joint), `trace.csv` (cube poses), `joints.csv`, `joint_tracking.csv` (delay and error per joint), `temperatures.csv`, `policy_log.csv` and `policy_node.log` (the policy node), and `meta.json` (git commit, policy file hash, options, start temperatures and the result).
+A motor temperature that jumps by more than 15 °C from one reading to the next, or lies outside 0..100 °C, is a bad reading of the servo and ignored (a new value read twice in a row counts); `temperature_glitches` in `results.csv` counts them.
+
+**Results** go to `<models-dir>/eval_<date_time>/`, one folder per start of the script (a session); a session without any run is deleted at the end, unless an error stopped it. To continue an evaluation later, pass that folder with `--out` (the full path): the models already saved there are skipped, except the ones named with `--models`, which run again. `--note "45 mm cube"` stores a note with every run of the session.
+- `<models-dir>/all_results.csv` collects every saved run of all sessions (column `session`): the table to compare the models.
+- `results.csv` has one row per run (also the ones not saved), and `summary.md` has the saved runs. They list the turns (positive = counterclockwise seen from above, the direction of a positive `goal`), the mean speed, the turns after 30 s, the fastest 10 s, the longest time without progress, how much of the run the cube was tracked, the joints' delay and the joints that barely follow their commands, the highest motor temperature, the summed mean motor current (`total_current_a`, effort and heating) and the joint with the highest current, the lowest supply voltage, the servo faults during the run (`servo_errors`, e.g. `pinky_mcp: overload`) and while parking afterwards (`servo_errors_parking`), and warnings. A warning means the count may be wrong: the cube was tracked for less than half of the run (`--min-tracked`), it was not detected for more than 3 s (`--max-gap`), or many poses were rejected. Run such a run again with `r`.
+- Each run has its own folder: `video.mp4` (the live view), `turns_vs_time.png`, `joints.png` (commanded and measured angle of every joint), `trace.csv` (cube poses), `joints.csv` (commanded and measured joints and the motor currents, 100 Hz), `joint_tracking.csv` (delay, error and current per joint), `temperatures.csv`, `motor_status.csv` (supply voltage and servo status bits per motor, once per second), `policy_log.csv` and `policy_node.log` (the policy node), and `meta.json` (git commit, policy file hash, the model's W&B run if `models.json` has it, options, note, start temperatures and the result). The session folder also holds `code_changes_<time>.diff` (the uncommitted changes of `rwr_system`, so that the commit plus this file is the code that ran) and `node_logs/` (camera, hand controller and viewer; a restarted node appends to its log).
 
 **Options**
 - `--exposure-us 5000` fixes the camera's exposure time for less motion blur (0, the default: auto exposure; `--iso` sets the sensitivity). Compare the poses per second with `--live`.
@@ -148,6 +151,7 @@ Ctrl+C at any time stops everything and leaves the hand in the start pose with t
 - `ros2 topic hz /oakd_bottom_view/color` shows images, but RViz does not: use an **Image** display (not Camera) with 'Reliability Policy: Best Effort'.
 
 **Hand controller**
+- The controller publishes `/right/hand/motor_current` (mA, 100 Hz, read with the positions) and, for Feetech servos, `/right/hand/motor_voltage` and `/right/hand/motor_errors` (status bits OR-ed over 1 s: 0x01 input voltage, 0x02 angle sensor, 0x04 overheating, 0x08 overcurrent, 0x20 overload). Voltage and status bits come from orca_core's last state packet (a private attribute); after an orca_core update without them, the log says `No motor voltage and status bytes` once and the controller runs on.
 - The hand is not found or the serial port is not accessible: check the USB cable and add yourself to the `dialout` group (`sudo usermod -aG dialout $USER`, then log out and in again).
 - Joint positions look wrong after rebuilding: `calibration.yaml` lives in `install/` (see [src/hand_control/README.md](../src/hand_control/README.md)); calibrate again.
 
