@@ -91,10 +91,30 @@ The launch file also takes `use_cube_pose`, `goal_ang_vel` and `goal_flip_period
 - While the cube is lost, the policy gets the last pose with the flag `tracked` = 0, as in the simulated tracker.
 - In the dry run, check the log line of the node: with the cube in the palm, `pos` is in the frame of the simulation, a few centimetres from the commanded position (0, 0, -0.05), and it follows the cube when you move it (+z is up). The CSV columns `cube_tracked` and `cube_age_s` show how often the cube is lost and how old the pose is. Compare them with `CUBE_TRACKER` in faive_lab.
 
+### Evaluate policies on the real hand
+
+`rl_inference/run_real_evaluation.sh` tests policies without the cube pose one after another and counts the cube's turns with the camera. It starts the camera with the cube detector, the hand controller, the live view (topic `/real_eval/view`, opened in `rqt_image_view`) and one policy node per run. It does not need the camera calibration: it counts in the camera's frame. It does need the detector's model files (see [Detect the cube](#detect-the-cube)).
+
+1. Put each policy in its own folder with its `policy.pt`, and list the folders in a `models.json` in the parent folder (default `~/policies/real_test`; `--models-dir` for another), newest first:
+    ```json
+    [{"idx": 6, "name": "wombat", "dir": "/path/to/06_wombat", "goal": 1.5}]
+    ```
+    `goal` is the test speed in rad/s (`--speed` sets one for all).
+2. Check the camera first. Only the camera starts, and the hand does not move: `experiments/rl_inference/run_real_evaluation.sh --live`, then turn the cube by hand in view of the camera. The count should follow, and the view shows the detections per second.
+3. Place the cube in the palm and run `experiments/rl_inference/run_real_evaluation.sh` (or `--models 06 20`). **The hand moves at start-up** to the start pose: the config's neutral pose with the wrist at `--start-wrist-deg` (30).
+
+For each model, the script waits until every motor is below 50 °C (`--start-temp`), asks you to start, and runs for 60 s (`--duration`). A run ends early when the cube falls, when it is not detected for 5 s, when a motor reaches 58 °C (`--abort-temp`), when the camera, the hand controller or the policy stops, or when you press Enter. The script then moves the hand back to the start pose, switches the torque off so that the motors cool down, and asks whether to save the run, repeat it or go to the next model. A stopped camera or hand controller is restarted.
+
+Results go to `<models-dir>/eval_<date_time>/` (`--out` with an earlier folder continues it):
+- `results.csv` (every run) and `summary.md` (the saved runs): turns, rad/s, turns after 30 s, the best 10 s, the longest stall, tracking quality, joint delay, joints that barely move, the highest temperature and warnings. A warning (little tracking, `--min-tracked`; long gaps, `--max-gap`; many rejected poses) means the count may be wrong.
+- One folder per run: `video.mp4` (the live view), `turns_vs_time.png`, `joints.png` (commanded and measured joints), `trace.csv`, `joints.csv`, `joint_tracking.csv`, `temperatures.csv`, `policy_node.log` and `meta.json` (git commit, policy hash, options, start temperatures, result).
+
+The camera is the one in `cfgs/cams/oakd_cube_task.yaml`. If that one is not connected, the only connected OAK-D is used instead; `--camera-id <ID>` chooses one (`camera_id:=<ID>` for `cube_spin_v2.launch.py`). `--exposure-us 5000` fixes the camera's exposure time for less motion blur (0: auto exposure, `--iso` sets the sensitivity). Compare the detections per second with `--live`. `--help` lists all options. `rl_inference/real_eval/test_offline.py` tests the turn counting and the analysis without hardware (run it with `pixi run python`).
+
 ### Troubleshooting
 
 **Camera**
-- `oakd camera <ID> not available` in the log: wrong ID in `oakd_cube_task.yaml`, no udev rule, or the camera was still resetting from the previous run (wait about 3 s and launch again).
+- `oakd camera <ID> not available` in the log: wrong ID in `oakd_cube_task.yaml` (or `camera_id:=`; the log lists the connected IDs), no udev rule, or the camera was still resetting from the previous run (wait about 3 s and launch again).
 - `StereoDepthProperties has no attribute 'MedianFilter'`: depthai 3 is installed; run `pixi run pip install "depthai<3"`.
 - `ros2 topic hz /oakd_bottom_view/color` shows images, but RViz does not: use an **Image** display (not Camera) with 'Reliability Policy: Best Effort'.
 
