@@ -1,7 +1,10 @@
 """ORCA v2 hand controller. Drives the hand through the orca_core package,
 exposing the interface hand_control_node.py expects."""
 import numpy as np
+import yaml
 from orca_core import load_hand
+
+from faive_system.src.hand_control.orca import servo_profile
 
 
 class OrcaHandV2:
@@ -9,6 +12,9 @@ class OrcaHandV2:
         # An explicit config_path skips orca_core's hardware autodetection.
         # calibration.yaml is read from and saved next to config_path.
         self._hand = load_hand(config_path=config_path)
+        with open(config_path) as stream:
+            self._config_yaml = yaml.safe_load(stream)
+        servo_profile.acceleration_raw(self._config_yaml)  # reject a bad value before the hand moves
         config = self._hand.config
         self.joint_ids = list(config.joint_ids)
         self.num_motors = len(self.joint_ids)
@@ -28,6 +34,8 @@ class OrcaHandV2:
             raise RuntimeError(f"Could not connect to the ORCA hand: {message}")
         # Calibrates automatically when no calibration exists; moves to the config's neutral pose.
         self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
+        # The same servo acceleration ramp as the chirp recordings the sim was fit to (init_joints writes orca_core's own).
+        self.servo_profile = servo_profile.apply(self._hand, self._config_yaml)
         if compliant_test_mode:
             self.disable_torque()
 

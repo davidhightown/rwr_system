@@ -40,7 +40,9 @@ TIMING_MARGIN = 0.05
 def make_parser():
     parser = chirp.make_parser()
     parser.description = __doc__
-    parser.set_defaults(config=INSTALLED_CONFIG, joints=None)
+    # Steps after each chirp (about 8 s per joint) show the dead time and the ramp directly; --steps-deg with no
+    # values turns them off.
+    parser.set_defaults(config=INSTALLED_CONFIG, joints=None, steps_deg=[2.0, 6.0, 18.0])
     parser.add_argument("--finger", choices=FINGERS, default="middle",
                         help="Finger meant for the fit, saved in metadata.json. All fingers are recorded.")
     parser.add_argument("--notes", default="",
@@ -214,7 +216,8 @@ def main(argv=None, *, factory=None, clock=time.monotonic, sleep=time.sleep):
                 calibration_modified_at_utc=modified.isoformat())
 
     print(json.dumps({key: value for key, value in plan.items() if key != "config"}, indent=2))
-    minutes = len(args.joints) * (args.duration + args.settle_time + 1) / 60
+    step_seconds = len(chirp.step_targets(args, 0.0)) / args.ctrl_freq if args.steps_deg else 0.0
+    minutes = len(args.joints) * (args.duration + args.settle_time + 1 + step_seconds) / 60
     print(f"About {minutes:.0f} min for {len(args.joints)} joints.")
     short = short_travel(calibration)
     for joint, (travel, median) in short.items():

@@ -58,6 +58,9 @@ class Hand:
         self.connected = False
         self.unacknowledged_motors = []
         self.disconnect_result = (True, "Disconnected")
+        config = yaml.safe_load(chirp.DEFAULT_CONFIG.read_text())
+        self.config = SimpleNamespace(motor_ids=config["motor_ids"])
+        self.servo_profiles = {}
 
     def is_calibrated(self):
         return self.calibrated
@@ -80,13 +83,26 @@ class Hand:
         self.commands.append(dict(command))
         self.command_kwargs.append(kwargs)
 
-    def get_joint_position(self):
+    def get_motor_state(self):
+        """The joint dict stands in for the motor positions; _motor_to_joint_pos passes it through."""
         self.reads += 1
         if self.reads == self.interrupt_on_read:
             raise KeyboardInterrupt()
         self.clock.sleep(self.read_latency)
         measured = {joint: value - 0.25 for joint, value in self.commands[-1].items()}
-        return SimpleNamespace(as_dict=lambda: measured)
+        count = len(self.config.motor_ids)
+        return SimpleNamespace(position=measured, velocity=np.arange(count, dtype=float),
+                               current=np.full(count, 100.0))
+
+    def _motor_to_joint_pos(self, position):
+        return position
+
+    def set_servo_profile(self, profiles):
+        self.events.append("servo_profile")
+        self.servo_profiles.update(profiles)
+
+    def get_servo_profile(self):
+        return {motor: self.servo_profiles.get(motor) for motor in self.config.motor_ids}
 
     def disable_torque(self):
         self.events.append("disable")
@@ -120,7 +136,7 @@ def run(experiment):
 
 
 def csv_rows(run_dir):
-    with next(run_dir.glob("*.csv")).open() as stream:
+    with next(run_dir.glob("chirp_*.csv")).open() as stream:
         return list(csv.DictReader(stream))
 
 
@@ -171,7 +187,7 @@ def test_real_samples_keep_csv_schema_and_other_joints_neutral(experiment):
         for joint, neutral in plan["config"]["neutral_position"].items():
             if joint != "index_mcp":
                 assert command[joint] == neutral
-    assert hand.events == ["connect", "init", "disable", "disconnect"]
+    assert hand.events == ["connect", "init", "servo_profile", "disable", "disconnect"]
     assert clock.now == pytest.approx(.2)
     assert json.loads((run_dir / "metadata.json").read_text())["status"] == "complete"
 
@@ -215,7 +231,7 @@ def test_interrupt_preserves_partial_csv_and_skips_remaining_joints(experiment):
         run(experiment)
     run_dir = next(args.output_dir.iterdir())
     assert len(csv_rows(run_dir)) == 1
-    assert len(list(run_dir.glob("*.csv"))) == 1
+    assert len(list(run_dir.glob("chirp_*.csv"))) == 1
     assert hand.events[-2:] == ["disable", "disconnect"]
     assert json.loads((run_dir / "metadata.json").read_text())["status"] == "interrupted"
 
@@ -252,7 +268,7 @@ def test_slow_bus_stops_without_catchup_burst(experiment):
 
 def test_missing_measurement_is_not_recorded_as_zero(experiment):
     args, _, _, hand = experiment
-    hand.get_joint_position = lambda: SimpleNamespace(as_dict=lambda: {"index_mcp": None})
+    hand._motor_to_joint_pos = lambda position: {"index_mcp": None}
     with pytest.raises(RuntimeError, match="No finite position"):
         run(experiment)
     assert csv_rows(next(args.output_dir.iterdir())) == []
@@ -292,7 +308,11 @@ def test_installed_orca_core_mock_hand_api(tmp_path):
         return hand
 
     run_dir = chirp.run_hardware(args, plan, factory=factory, clock=clock, sleep=clock.sleep)
-    assert len(list(run_dir.glob("*.csv"))) == 2
+    assert len(list(run_dir.glob("chirp_*.csv"))) == 2
+    assert len(list(run_dir.glob("fast_*.csv"))) == 2
+    metadata = json.loads((run_dir / "metadata.json").read_text())
+    assert metadata["servo_profile"]["servo_acceleration_raw"] == 150
+    assert all(m["acceleration_raw"] == 150 for m in metadata["servo_profile"]["motors"].values())
     assert len(csv_rows(run_dir)) == 4
     assert all(np.isfinite(float(row["measured_position"])) for row in csv_rows(run_dir))
     assert not hands[0].is_connected()
@@ -533,3 +553,70 @@ def test_all_with_installed_orca_core_mock_hand(tmp_path, monkeypatch):
     assert not hands[0].is_connected()
     # Mock calibration must never be written over a real hand's calibration.
     assert (tmp_path / "calibration.yaml").read_text() == before
+
+
+def test_fast_reads_between_commands_and_steps(experiment):
+    args, plan, clock, hand = experiment
+    args.steps_deg = [2.0, 5.0]
+    args.step_hold = 0.1
+    plan = chirp.make_plan(args, plan["config"])
+    run_dir = run((args, plan, clock, hand))
+    fast, = run_dir.glob("fast_index_mcp_*.csv")
+    steps, = run_dir.glob("steps_index_mcp_*.csv")
+    with fast.open() as stream:
+        rows = list(csv.DictReader(stream))
+    assert list(rows[0]) == chirp.FAST_CSV_FIELDS
+    # 4 commands at 20 Hz, 5 reads after each at 100 Hz
+    np.testing.assert_allclose([float(r["timestamp"]) for r in rows], np.arange(20) * .01, atol=1e-9)
+    assert float(rows[0]["motor_velocity"]) == chirp.joint_motor_index(plan["config"], "index_mcp")
+    # the 20 Hz CSV is the first read after each command
+    assert [r["measured_position"] for r in csv_rows(run_dir)] == [r["measured_position"] for r in rows[::5]]
+    with steps.open() as stream:
+        commanded = [float(r["commanded_position"]) for r in csv.DictReader(stream)][::5]
+    c = plan["centers_deg"]["index_mcp"]
+    assert commanded == [c] * 2 + [c + 2] * 2 + [c] * 2 + [c - 2] * 2 + [c] * 2 + [c + 5] * 2 + [c] * 2 \
+        + [c - 5] * 2 + [c] * 2
+    metadata = json.loads((run_dir / "metadata.json").read_text())
+    assert metadata["fast_csv_files"] == [fast.name] and metadata["step_csv_files"] == [steps.name]
+
+
+def test_read_rate_equal_to_control_rate_writes_no_fast_csv(experiment):
+    args, plan, clock, hand = experiment
+    args.read_hz = args.ctrl_freq
+    run_dir = run((args, chirp.make_plan(args, plan["config"]), clock, hand))
+    assert not list(run_dir.glob("fast_*.csv"))
+    assert len(csv_rows(run_dir)) == 4
+
+
+@pytest.mark.parametrize("options", [["--read-hz", "50"], ["--read-hz", "10"], ["--steps-deg", "-3"],
+                                     ["--steps-deg", "200"]])
+def test_invalid_read_rate_or_steps_are_rejected(options, monkeypatch):
+    monkeypatch.setitem(sys.modules, "orca_core", None)
+    with pytest.raises(SystemExit) as exc:
+        chirp.main(options + ["--execute"])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("value", [-1, 255, 2.5, "150", True])
+def test_invalid_servo_acceleration_is_rejected(value):
+    with pytest.raises(ValueError, match="servo_acceleration_raw"):
+        chirp.servo_profile.acceleration_raw({"servo_acceleration_raw": value})
+
+
+def test_configured_servo_acceleration_is_written_and_recorded(experiment):
+    args, plan, clock, hand = experiment
+    plan["config"]["servo_acceleration_raw"] = 0
+    run_dir = run((args, chirp.make_plan(args, plan["config"]), clock, hand))
+    assert {p.acceleration_rad_s2 for p in hand.servo_profiles.values()} == {0.0}
+    metadata = json.loads((run_dir / "metadata.json").read_text())
+    assert metadata["servo_profile"]["servo_acceleration_raw"] == 0
+    assert metadata["servo_profile"]["motor_acceleration_rad_s2"] is None
+
+
+def test_servo_acceleration_that_does_not_read_back_stops_the_run(experiment):
+    args, plan, clock, hand = experiment
+    hand.get_servo_profile = lambda: {motor: None for motor in hand.config.motor_ids}
+    with pytest.raises(RuntimeError, match="did not read back"):
+        run(experiment)
+    assert not list(next(args.output_dir.iterdir()).glob("*.csv"))
+    assert hand.events[-2:] == ["disable", "disconnect"]

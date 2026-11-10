@@ -1,6 +1,11 @@
 # motor_type and baudrate are auto-detected at connect; set them here to pin a driver
 port: auto
 max_current: default
+# Servo acceleration ramp (Feetech ACC register, 8.7 deg/s^2 of motor shaft per unit; 0 = no ramp, max 254).
+# Read by rwr_system, not orca_core: the chirp recorder and the hand controller write it after init_joints.
+# It sets how fast the joints can follow a command (about 24 rad/s^2 at a finger joint at 150), so the sim
+# (rwr_faive_lab ORCA_V2_SERVO_ACCEL) must be fit to chirps recorded with the same value.
+servo_acceleration_raw: 150
 type: right
 control_mode: current_based_position
 # Also the order in which the motors answer a sync read. Motor 12 is last because its reply
