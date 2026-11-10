@@ -45,6 +45,11 @@ launch:
       description: "Wrist angle (degrees) of the start-up pose instead of the config's neutral_position; none = the config's"
 
   - arg:
+      name: "torque_off_on_exit"
+      default: "false"
+      description: "Switch the torque off when the hand controller stops (Ctrl+C), so the hand does not keep holding a pose"
+
+  - arg:
       name: "launch_hand_controller"
       default: "true"
       description: "Whether to launch the hand controller node (all other nodes will still launch, so this is useful for debugging without the robot etc.)"
@@ -91,6 +96,8 @@ launch:
           value: "$(var compliant_test_mode)"
         - name: "hand_controller/neutral_wrist_deg"
           value: "$(var neutral_wrist_deg)"
+        - name: "hand_controller/torque_off_on_exit"
+          value: "$(var torque_off_on_exit)"
 
 
   # -------- Visualize target pose (commanded) --------
