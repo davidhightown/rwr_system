@@ -245,4 +245,11 @@ and "The hand" in the [main README](../../README.md).
   `--center-deg`. In minimum-gap mode, also lower `--abd-gap-deg`.
 - **"Missed a full control period":** the bus is too slow for the commands. Close other programs on the port, or
   lower `--read-hz`.
+- **The other fingers don't seem to move out of the way:** `check_clearance.py` takes the same flags as `chirp.py`.
+  For each finger abduction joint, it ramps into that sweep's start pose, holds it for 2 s, reads every joint back,
+  and prints neutral / target / measured for the fingers that should have moved. A finger is flagged if it
+  `stayed near neutral` or `did not reach target` (more than 3° off). No chirp, about 4 s per joint:
+  ```bash
+  python experiments/orca/check_clearance.py --config ~/ros_ws/chirp_config/config.yaml --abd-clear-all --execute
+  ```
 - **Old runs with long CSV names:** `rename_chirp_results.py <run>` previews shorter names; `--apply` renames them.
