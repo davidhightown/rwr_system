@@ -22,12 +22,24 @@ class OrcaHandV2:
             if config.joint_inversion_dict.get(joint, False):
                 self._joint_signs[joint_index[joint]] = -1.0
 
-    def init_joints(self, calibrate: bool = False, initialize: bool = True, compliant_test_mode: bool = False):
+    def init_joints(self, calibrate: bool = False, initialize: bool = True, compliant_test_mode: bool = False,
+                    neutral_overrides: dict | None = None):
         ok, message = self._hand.connect(interactive=False)
         if not ok:
             raise RuntimeError(f"Could not connect to the ORCA hand: {message}")
-        # Calibrates automatically when no calibration exists; moves to the config's neutral pose.
-        self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
+        # Calibrates automatically when no calibration exists; moves to the config's neutral pose,
+        # with the joint angles in neutral_overrides (degrees) replaced if given.
+        if neutral_overrides:
+            from orca_core.constants import NUM_STEPS
+            from orca_core.joint_position import OrcaJointPositions
+
+            self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=False)
+            if initialize:
+                pose = dict(self._hand.config.neutral_position)
+                pose.update(neutral_overrides)
+                self._hand.set_joint_positions(OrcaJointPositions.from_dict(pose), num_steps=NUM_STEPS)
+        else:
+            self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
         if compliant_test_mode:
             self.disable_torque()
 
@@ -45,6 +57,10 @@ class OrcaHandV2:
         motor_ratios = np.array([ratios[motor_ids[i]] or np.nan for i in self._joint_order])
         vel = self._joint_signs * np.asarray(state.velocity)[self._joint_order] / motor_ratios
         return pos, vel
+
+    def read_motor_temperature(self):
+        """One bus read -> motor temperatures [°C] in joint_ids order."""
+        return np.asarray(self._hand.get_motor_temp(), dtype=np.float32)[self._joint_order]
 
     def enable_torque(self):
         self._hand.enable_torque()

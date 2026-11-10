@@ -4,6 +4,7 @@ from rclpy.node import Node
 import numpy as np
 from std_msgs.msg import Float32MultiArray
 from std_srvs.srv import SetBool
+from rcl_interfaces.msg import ParameterDescriptor
 import os
 from ament_index_python.packages import get_package_share_directory
 
@@ -45,14 +46,27 @@ class HandControllerNode(Node):
             self.joint_angle_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/joint_position_from_motor', 10)
             self.joint_velocity_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/joint_velocity_from_motor', 10)
 
+            # optional wrist angle (degrees) of the start-up pose instead of the config's neutral_position
+            self.declare_parameter('hand_controller/neutral_wrist_deg', 'none',
+                                   ParameterDescriptor(dynamic_typing=True))
+            neutral_wrist = self.get_parameter('hand_controller/neutral_wrist_deg').value
+            neutral_overrides = None
+            if neutral_wrist not in (None, '', 'none'):
+                neutral_overrides = {'wrist': float(neutral_wrist)}
+                self.get_logger().info(f"Start-up pose: neutral_position with the wrist at {float(neutral_wrist):.1f} deg")
+
             from faive_system.src.hand_control.orca.hand_controller_v2 import OrcaHandV2
             # orca_core requires the file name config.yaml; calibration.yaml is stored next to it
             self._hc = OrcaHandV2(os.path.join(config_dir_path, self.chirality, "config.yaml"))
-            self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode)
+            self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode,
+                                 neutral_overrides=neutral_overrides)
             self._orca_timer = self.create_timer(
                 0.01, # seconds
                 self.orca_v2_control_cb,  # callback
             )
+            # motor temperatures (°C, joint_ids order) once per second, e.g. for evaluate_real_policies.py
+            self.temperature_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/motor_temperature', 10)
+            self._temperature_timer = self.create_timer(1.0, self.orca_v2_temperature_cb)
 
         else:
             raise NotImplementedError("Hand name not recognized")
@@ -94,6 +108,15 @@ class HandControllerNode(Node):
         self.joint_angle_pub.publish(Float32MultiArray(data=np.deg2rad(q_deg).astype(np.float32)))
         self.joint_velocity_pub.publish(Float32MultiArray(data=np.deg2rad(qd_deg).astype(np.float32)))
 
+    def orca_v2_temperature_cb(self):
+        """
+        publish the motor temperatures (°C, joint_ids order)
+        """
+        try:
+            self.temperature_pub.publish(Float32MultiArray(data=self._hc.read_motor_temperature().tolist()))
+        except Exception as e:
+            self.get_logger().warn(f"Could not read the motor temperatures: {e}", throttle_duration_sec=10.0)
+
 
     def set_torque_enabled_cb(self, request, response):
         """
@@ -123,6 +146,7 @@ class HandControllerNode(Node):
                 # stop reading and commanding before the bus goes away. Without this, an e-stop crashes the node
                 if not self._orca_timer.is_canceled():
                     self._orca_timer.cancel()
+                    self._temperature_timer.cancel()
                     self.destroy_subscription(self.joint_angle_sub)
                     self._hc.disconnect()
             else:
