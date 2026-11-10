@@ -1,243 +1,248 @@
-# ORCA v2 chirp and joint data acquisition
+# ORCA v2 chirp recording
 
-`chirp.py` collects ORCA v2 data through `orca_core`'s
-public joint-position API. It runs directly with Python on macOS/Linux.
+Record joint chirps on the ORCA v2 hand through `orca_core`, without ROS, to identify the servo model.
 
-## Install for standalone v2 acquisition
+## Which script?
 
-From the repository root, create a separate Python 3.10+ environment (for
-example, Python 3.12):
+| Script | What it is | Use it for |
+|---|---|---|
+| `chirp.py` | The original recorder. It sweeps the joints you list (default: only `index_mcp`) and writes the CSVs. Nothing else. | One-off checks, custom sweeps |
+| `chirp_all.py` | The newer wrapper around `chirp.py`. It has the same sweep, plus SysID defaults, checks before and after the run, and a tagged run folder (see below). | **Every SysID recording**, including a single finger |
 
-```bash
-python3.12 -m venv .venv.chirp
-source .venv.chirp/bin/activate
-python -m pip install orca_core==0.5.2 scipy
-```
+`chirp_all.py` accepts every `chirp.py` flag and changes these defaults:
 
-No editable installation of `faive_system` is necessary for this standalone
-script. A separate environment avoids the conflict between `orca_core`'s
-NumPy requirement and `faive_system`'s NumPy 1.26.4 pin. For an existing
-Faive/ROS environment, see the installation notes in
-[`src/hand_control/README.md`](../../src/hand_control/README.md).
+| | `chirp.py` | `chirp_all.py` |
+|---|---|---|
+| `--config` | the repo's `src/.../orcahand_v2/right/config.yaml` | the installed `~/ros_ws/install/.../orcahand_v2/right/config.yaml` |
+| `--joints` | `index_mcp` | all 17, with the `--finger` joints first |
+| `--steps-deg` | none | `2 6 12` (steps after each chirp) |
+| `--abd-clear-all` | off | **always on** (other fingers go to their abduction limits) |
 
-On macOS, you can use the `rwr_jazzy` environment instead (see the
-[main README](../../README.md)). It already contains `orca_core` and `scipy`.
+`chirp_all.py` also:
+- runs from a copy of `config.yaml` and `calibration.yaml`, so a symlinked install config works;
+- warns before moving if a joint's calibrated motor travel looks stalled;
+- prints a check table and opens `overview.png` after the run;
+- saves the config and calibration in the run folder and tags the folder `_good`/`_bad`/...
 
-## Prepare the hand
+Both scripts only print the plan by default. **Nothing moves without `--execute`.**
 
-1. Tension and calibrate the correct physical hand using the existing v2
-   workflow. Chirp requires complete calibration and will **not** automatically
-   calibrate it. See the hand-control README above.
-2. Prepare your hand's own `config.yaml` and place its `calibration.yaml`
-   in the same directory. Pass your config path with `--config` in the
-   commands below, replacing `/path/to/your/config.yaml` with your file.
-   After a `colcon build --symlink-install`, the installed `config.yaml` is a
-   symlink to the source folder, and `chirp.py` then looks for `calibration.yaml`
-   in the source folder. Copy both files to a folder of their own and use that:
+## Setup
+
+1. **Python.** On macOS, use the `rwr_jazzy` environment (see the [main README](../../README.md)). It already contains
+   `orca_core` and `scipy`. Otherwise, create a separate environment from the repo root. `orca_core`'s NumPy
+   conflicts with `faive_system`'s pin:
    ```bash
-   mkdir -p ~/ros_ws/chirp_config
-   cp -L ~/ros_ws/install/hand_control/share/hand_control/orca/configs/orcahand_v2/right/{config,calibration}.yaml ~/ros_ws/chirp_config/
+   python3.12 -m venv .venv.chirp && source .venv.chirp/bin/activate
+   python -m pip install orca_core==0.5.2 scipy matplotlib
    ```
-   Copy them again after each new calibration or change of `config.yaml`.
-3. Connect power and USB. Keep `port: auto` in your config for automatic
-   detection. If it fails or selects the wrong device, set `port` manually
-   to the actual serial device (see Troubleshooting).
-4. Stop the ROS controller, GUI, tensioning tool, and any other program using
-   the same serial port. Leave the hand unloaded with room to move.
+2. **Calibrate** the hand with the normal v2 workflow ([`src/hand_control/README.md`](../../src/hand_control/README.md)).
+   The scripts refuse to run without a complete `calibration.yaml` beside `config.yaml`. They never calibrate on their own.
+3. **Connect** power and USB. `port: auto` in `config.yaml` usually works (see Troubleshooting).
+4. **Free the port and the hand.** Stop the ROS controller, GUI, tensioning tool and anything else that uses the
+   serial port. Leave the hand unloaded, with room to move.
 
-## Record all joints
-
-## What the hand does with a command
-
-The Feetech servos do not jump to a goal position. Each runs its own trapezoidal trajectory toward it,
-limited by its acceleration register (ACC). At ACC 150 that is 22.8 rad/s^2 at the motor, about
-22-30 rad/s^2 at a finger or thumb joint (the motor-per-joint ratio in `calibration.yaml`), and about 12 at
-the wrist. A 10° chirp needs more than that above about 1.8 Hz. The ramp sits behind a dead time of about
-40 ms, from the command write to the motor encoder. Together the two explain the recorded chirps to
-0.1-0.5° RMS (up to 2.5 Hz). A linear model (a PD joint with any stiffness and damping, plus a delay) cannot
-reproduce them. The goal current (900 mA) caps the torque. A free-moving joint never reaches it, but a joint
-pushing against something does.
-
-orca_core writes its own ACC (150) in `init_joints`. `config.yaml` now sets it explicitly
-(`servo_acceleration_raw`). Both the recorder and the ROS hand controller write it after `init_joints`, read
-it back, and refuse to run if a motor does not hold it (`src/hand_control/orca/servo_profile.py`). Chirps
-and deployment therefore always run the same ramp, and each run records it in `metadata.json`. If you
-change it, record new chirps and refit before you deploy.
-
-## Record all joints
-
-`chirp_all.py` records all 17 joints in one run (about 8 minutes), so you can
-fit one finger and use the other three to find outliers and measure the spread:
+`chirp_all.py` reads the installed config by default (after `colcon build`). For another workspace, pass `--config`.
+`chirp.py` needs `--config` pointing at a real folder. It looks for `calibration.yaml` beside the *resolved* path,
+and the installed `config.yaml` is a symlink into the source folder. Copy both files out (again after each
+recalibration):
 
 ```bash
-python experiments/orca/chirp_all.py            # plan only
-python experiments/orca/chirp_all.py --execute  # move the hand
+mkdir -p ~/ros_ws/chirp_config
+cp -L ~/ros_ws/install/hand_control/share/hand_control/orca/configs/orcahand_v2/right/{config,calibration}.yaml ~/ros_ws/chirp_config/
 ```
 
-It uses the installed `~/ros_ws/install/.../right/config.yaml` and the
-`calibration.yaml` beside it; pass `--config` for another workspace. You do not
-need the copy from step 2 above. The sweep options are the same as for `chirp.py`, and
-`--joints` limits the run to some joints.
+## Run it
 
-By default each joint ramps to its first chirp sample over about 1 s. `--no-ramp` skips this: the
-joint jumps there at full motor speed and the previous joint snaps back to neutral. `metadata.json`
-records the choice under `ramp_to_start`. The initial move to neutral at startup still ramps.
+```bash
+python experiments/orca/chirp_all.py                     # plan only: centers, neighbour poses, duration
+python experiments/orca/chirp_all.py --execute           # all 17 joints, about 8 min
+```
 
-**Neighbouring fingers.** With all other fingers at neutral, an abduction sweep runs into the next finger. On
-the 2026-11 runs, ring_abd stopped about 6° short on the middle-finger side, and middle_abd on both sides.
-During a finger's abduction sweep, the other fingers therefore spread outward. Each moves just enough to stay
-`--abd-gap-deg` (default 8°) from the next finger inward, at the extremes of the sweep. If a neighbour would leave
-its ROM, the sweep center moves toward the free side instead (for example, pinky_abd sweeps about +13°). The plan
-prints the centers and the poses (`centers_deg`, `neighbour_pose`), so check them with a dry run. On a new hand,
-check them once with a small amplitude. `--abd-gap-deg 0` restores neutral neighbours. This assumes positive
-abduction points toward the pinky, which the script checks against the neutral pose. Flexion sweeps keep the
-other fingers at neutral.
+**First run on a new hand:** check one joint with a small amplitude:
 
-After the run, the table flags `stops short -` / `stops short +`: the joint fell more than 1.5° short of
-the command on that side below 1 Hz, where the servo dynamics cost well under a degree. A shortfall on one side
-means something stops it there. On the 2026-11 runs, the middle/ring/pinky PIPs fall short by a similar amount on
-both sides, with the neighbours at neutral. That points at the joint's own load (the motor stalls at its current
-limit) rather than a collision. The motor current in `fast_*.csv` shows which.
+```bash
+python experiments/orca/chirp_all.py --joints index_mcp --amplitude-deg 3 --steps-deg --execute
+```
 
-After each chirp, `chirp_all.py` steps the joint by ±2°, ±6° and ±12° about the center (0.6 s each,
-`--steps-deg`, `--step-hold`). Small steps show the dead time and large steps the ramp, without a
-fit. Between the 20 Hz commands both scripts read the hand at 100 Hz (`--read-hz`), the read rate of the
-deployment controller, so the bus carries the same load.
+Ctrl+C stops the run at any time. The partial data is kept, and the folder is tagged `_interrupted`.
 
-`--finger` (default `middle`) only saves the finger meant for the fit in
-`metadata.json`, under `fit_finger` and `fit_joints`, so you can still fit another finger later.
-Before it moves, the script warns you if a joint's motor travel in `calibration.yaml` is more than
-25% below the median of the same joint on all fingers, and asks whether to continue.
+### Only one finger
 
-After the run it prints a table, opens `overview.png`, and asks whether the run
-was good and for optional notes (or pass `--notes`). The answer is added to the folder name:
+Pass that finger's three joints to `--joints`, and the same finger to `--finger`:
+
+```bash
+python experiments/orca/chirp_all.py --joints ring_abd ring_mcp ring_pip --finger ring            # plan
+python experiments/orca/chirp_all.py --joints ring_abd ring_mcp ring_pip --finger ring --execute  # ~1.5 min
+```
+
+`--finger` does not select joints. It only records which finger is meant for the fit (`fit_finger` and
+`fit_joints` in `metadata.json`), and it defaults to `middle`. If you leave it out, a ring-only run has an empty
+`fit_joints`. To include the joints that the minimal SysID set shares, add them too:
+
+```bash
+python experiments/orca/chirp_all.py --finger index --execute \
+  --joints wrist thumb_cmc thumb_abd thumb_mcp thumb_dip index_abd index_mcp index_pip
+```
+
+This is the minimal set (eight joints) for whole-hand SysID. faive_lab reuses that finger's fit for the other
+three fingers. This assumes they behave alike, so a full 17-joint run is still the better check.
+
+Joint names: `wrist`, `thumb_cmc`, `thumb_abd`, `thumb_mcp`, `thumb_dip`, and `<finger>_abd`, `<finger>_mcp`,
+`<finger>_pip` for `index`, `middle`, `ring` and `pinky`.
+
+### Keeping the other fingers out of the way
+
+Only **finger abduction sweeps** (`index_abd` ... `pinky_abd`) move other joints. With every other finger at
+neutral, an abduction sweep runs into the next finger. On the 2026-11 runs, ring_abd stopped about 6° short on the
+middle-finger side, and middle_abd on both sides. So, before the sweep, the other fingers' abduction moves away
+from the tested finger. They ramp there with the tested joint, hold during the chirp and the steps, and go back
+to neutral for the next joint. There are two modes:
+
+| Mode | How | What the other fingers do |
+|---|---|---|
+| **Clear all** | `--abd-clear-all`. Always on in `chirp_all.py` | Every other finger goes to its abduction ROM limit (minus 2°) on the side away from the tested finger. The sweep stays at the ROM midpoint. Maximum clearance. |
+| **Minimum gap** | `chirp.py` default, `--abd-gap-deg 8` | Each finger moves only as far as needed to stay `--abd-gap-deg` from the next finger inward at the sweep's extremes. If a neighbour would leave its ROM, the sweep center moves toward the free side (pinky_abd sweeps at about +13°). |
+| **None** | `chirp.py --abd-gap-deg 0` | All other fingers stay at neutral (the old behaviour). |
+
+For example, `ring_abd` in clear-all mode puts index at −23°, middle at −25° and pinky at +28°.
+Always look at `neighbour_pose` and `centers_deg` in the printed plan before `--execute`. On a new hand,
+check them once with a small amplitude. Both modes assume that positive abduction points toward the pinky, and
+the script checks this against the neutral pose.
+
+In `chirp_all.py`, `--abd-gap-deg` has no effect on finger abduction: clear-all is fixed and has no switch to turn
+it off. To use the minimum gap or neutral neighbours, run `chirp.py` with the same joints.
+
+Flexion (`_mcp`, `_pip`), thumb and wrist sweeps keep every other joint at neutral. Nothing moves out of the way
+for them. When a PIP stops short on both sides (as middle/ring/pinky do on the 2026-11 runs), that points at the
+joint's own load (the motor stalls at its current limit), not at a neighbour.
+
+## Flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--execute` | off | Connect and move the hand. Without it, only print the plan (`--dry-run` says so explicitly). |
+| `--config PATH` | see table above | This hand's `config.yaml`. `calibration.yaml` must be beside it. |
+| `--joints J ...` | see table above | Joints to sweep, one after another, in this order. |
+| `--finger F` | `middle` | *chirp_all only.* The finger meant for the fit, saved in `metadata.json`. Does not select joints. |
+| `--notes TEXT` | asked after the run | *chirp_all only.* Saved in `metadata.json`, e.g. `"re-tensioned index"`. |
+| `--amplitude-deg` | 10 | Chirp amplitude about the center. |
+| `--center-deg` | ROM midpoint | Sweep center for every joint. center ± max(amplitude, steps) must fit within the ROM. |
+| `--f0`, `--f1` | 0.1, 5 | Start and end frequency of the logarithmic sweep (Hz). `f1` must be below `ctrl-freq / 2`. |
+| `--duration` | 20 | Seconds per chirp. |
+| `--ctrl-freq` | 20 | Command rate (Hz), as in deployment. One row of the chirp CSV per command. |
+| `--read-hz` | 100 | Read rate between commands (the fast CSV). A whole multiple of `--ctrl-freq`. 100 Hz loads the bus as the deployment controller does. |
+| `--steps-deg S ...` | see table above | After each chirp: steps of +S, back, −S, back about the center. `--steps-deg` with no values turns them off. |
+| `--step-hold` | 0.6 | Seconds to hold each step target. |
+| `--abd-clear-all` | see table above | Move all other fingers' abduction to their ROM limits during an abduction sweep. |
+| `--abd-gap-deg` | 8 | Minimum-gap mode (see above); 0 = neighbours stay at neutral. Ignored for finger abduction when clear-all is on. |
+| `--settle-time` | 1.0 | Seconds to wait at the first chirp sample before recording. |
+| `--no-ramp` | off | Jump to each joint's start pose at full motor speed instead of ramping over about 1 s. The neighbours also jump. The initial move to neutral still ramps. Recorded as `ramp_to_start`. |
+| `--output-dir` | `logs/chirp_v2` | Where run folders go. |
+
+A full `chirp_all.py` run takes about (duration + settle + 1 s ramp + 7.8 s of steps) ≈ 30 s per joint.
+The plan prints the estimate.
+
+## Checking a run (`chirp_all.py`)
+
+After the run, the script prints a table per joint (samples, moved = measured/commanded peak-to-peak, mean period,
+calibrated motor travel), opens `overview.png`, and asks whether the run was good. The flags in the table:
+
+| Flag | Meaning |
+|---|---|
+| `low motion` | Moved less than 75% of the commanded peak-to-peak range |
+| `stops short -` / `+` | Below 1 Hz, more than 1.5° short of the command on that side. The servo itself loses well under a degree there, so something stops it. On one side only: probably a neighbour. On both: the joint's own load. The motor current in `fast_*.csv` shows which. |
+| `short travel` | The calibrated motor travel is more than 25% below the median of the same joint on the other fingers (probably stalled in calibration) |
+| `too few samples`, `timing`, `no data` | The recording is incomplete or the control period drifted by more than 5% |
+
+Answer `n` only if the run itself was disturbed (bumped, loaded, loose cable). A genuine outlier is still a good run.
+The answer is added to the folder name:
 
 | Suffix | Meaning |
 |---|---|
 | `_good` | You answered `y` |
-| `_bad` | You answered `n`: the run itself was disturbed. A genuine outlier is still a good run |
+| `_bad` | You answered `n` |
 | `_untagged` | You pressed Enter or Ctrl+C at the prompt; rename the folder when you decide |
 | `_interrupted` | You stopped the run with Ctrl+C; the partial data is kept |
 | `_failed` | The run stopped with an error; the partial data is kept |
 
-The table flags `low motion` (moved less than 75% of the commanded peak-to-peak range), `short travel`,
-`too few samples`, `timing` and `no data`. `overview.png` shows each joint type in one column.
-
-## Collect data
-
-To record only some joints, use `chirp.py`. The minimum for whole-hand SysID is eight representative
-joints: the wrist, four thumb joints, and three joints of one finger. faive_lab fits these eight
-and reuses that finger's parameters for the other three fingers (nine more joints). This reduces
-recording and fitting time; it assumes similar dynamics, not identical measured behavior.
-
-```bash
-python experiments/orca/chirp.py \
-  --config /path/to/your/config.yaml \
-  --joints wrist thumb_cmc thumb_abd thumb_mcp thumb_dip index_abd index_mcp index_pip \
-  --ctrl-freq 20 --duration 20 --f0 0.1 --f1 5 --amplitude-deg 10 --execute
-```
-
-Each joint runs a 20-second logarithmic sweep from 0.1 to 5 Hz at 20 Hz
-control, with ±10° about its ROM midpoint. Other joints hold their neutral
-pose. Use `--center-deg` to change the center; the trajectory must fit within
-the joint limits. Ctrl+C stops the experiment.
+`chirp.py` does none of this: its folder has only the timestamp, and you check the data with `plot.py`.
 
 ## Output
 
-Each run creates a directory under `logs/chirp_v2/` (`--output-dir` to change):
-
 ```text
-logs/chirp_v2/<timestamp>/
-├── metadata.json
-├── chirp_<joint>_*.csv   # one CSV per selected joint: the read right after each 20 Hz command
-├── fast_<joint>_*.csv    # every read at --read-hz, with the motor's velocity (rad/s) and current (mA)
-└── steps_<joint>_*.csv   # the steps, same columns as fast_ (with --steps-deg)
+logs/chirp_v2/<UTC timestamp>[_tag]/
+├── metadata.json         # plan, centers, neighbour_pose, servo_profile, servo_gains, temperatures, status
+├── chirp_<joint>_*.csv   # the read right after each 20 Hz command: timestamp, commanded_position, measured_position
+├── fast_<joint>_*.csv    # every read at --read-hz, plus motor_velocity (rad/s) and motor_current (mA)
+├── steps_<joint>_*.csv   # the steps, same columns as fast_ (if --steps-deg)
+├── config.yaml           # chirp_all only
+├── calibration.yaml      # chirp_all only
+└── overview.png          # chirp_all only
 ```
 
-`metadata.json` also records the servo ramp each motor held (`servo_profile`) and the servos' own
-position-loop gains (`servo_gains`).
+Times are in seconds, angles in degrees, and there are 400 rows per chirp with the defaults. Keep the filenames and
+`metadata.json` together. Use only runs with `"status": "complete"` for SysID. On motor-only hands, measured angles are
+calibrated estimates derived from the motors, not independent encoder readings.
 
-`chirp_all.py` adds the suffix above to the folder, and also saves `config.yaml`, `calibration.yaml` and
-`overview.png` in it. The timestamp in the folder name is in UTC. `metadata.json` includes the motor
-temperatures at the start and end of the run.
+## What the hand does with a command
 
-CSV columns (seconds and degrees; 400 rows per joint with the settings above):
+The Feetech servos do not jump to a goal position. Each one runs its own trapezoidal trajectory toward it, limited by
+its acceleration register (ACC). At ACC 150 that is 22.8 rad/s² at the motor, about 22-30 rad/s² at a finger or
+thumb joint (via the motor-per-joint ratio in `calibration.yaml`), and about 12 at the wrist. A 10° chirp needs
+more than that above about 1.8 Hz. The ramp sits behind a dead time of about 40 ms from the command write to the
+motor encoder. Together, the two explain the recorded chirps to 0.1-0.5° RMS (up to 2.5 Hz). A linear model (a PD
+joint with any stiffness and damping, plus a delay) cannot reproduce them. The goal current (900 mA) caps the
+torque. A free-moving joint never reaches it, but a joint pushing against something does.
 
-```text
-timestamp,commanded_position,measured_position
-```
+`config.yaml` sets the ramp (`servo_acceleration_raw`). Both the recorder and the ROS hand controller write it after
+`init_joints`, read it back, and refuse to run if a motor does not hold it (`src/hand_control/orca/servo_profile.py`).
+Chirps and deployment therefore run the same ramp, and each run records it in `metadata.json`. If you change it,
+record new chirps and refit before you deploy.
 
-Keep the original filenames and `metadata.json` together. Only use recordings
-marked `complete` in metadata for SysID. On motor-only hands, measured angles
-are calibrated motor-derived estimates, not independent encoder measurements.
+## Inspect and fit
 
-## Inspect a recording
-
-Plot the commanded/measured angles and Bode response:
+Plot one recording (commanded/measured and Bode response). Prefix `MPLBACKEND=Agg` on a headless machine:
 
 ```bash
-python -m pip install pandas matplotlib
-python experiments/orca/plot.py /path/to/recording.csv --save
+python experiments/orca/plot.py logs/chirp_v2/<run>/chirp_index_mcp_*.csv --save
 ```
 
-The PNG is saved in the current directory. On a headless machine, prefix
-the command with `MPLBACKEND=Agg`. Plotting does not change the CSVs or SysID
-settings; see `plot.py --help` for trim and alignment options.
-
-## Fit the servo model
+Fit the servo model (dead time + ramp per joint, about 30 s, no Isaac):
 
 ```bash
-python experiments/orca/fit_servo.py logs/chirp_v2/<run>_good
+python experiments/orca/fit_servo.py logs/chirp_v2/<run>_good                  # every joint in the run
+python experiments/orca/fit_servo.py logs/chirp_v2/<run>_good --joints ring_abd # some joints
 ```
 
-It fits the dead time and the ramp of every joint, in the time domain, in about 30 s without Isaac. It also
-fits a linear model for comparison. It writes `servo_fit.json` and `servo_fit.png` into the run folder and
-prints:
+It writes `servo_fit.json` and `servo_fit.png` into the run folder and prints:
 
-- per joint: the dead time, the fitted ramp, the ramp that ACC and the calibration predict, and the RMS error
-  of the servo model and of the best linear model;
-- flags: `clipped` (the joint stops short of the command: a neighbouring finger, a coupled tendon or the
-  current limit, so it measures contact, not the free actuator) and `ramp differs` (more than 10 % from
-  the prediction). Flagged joints are left out of the sim values. On the 2026-11-05 runs (recorded before
-  the neighbour clearance existed), middle/ring abd and middle/pinky pip clip; the index finger does not;
-- the sim values: `ORCA_V2_SERVO_ACCEL` per joint group, and the actuator's dead time + lag for the
-  fingers/thumb and the wrist.
+- per joint: the dead time, the fitted ramp, the ramp that ACC and the calibration predict (only with a
+  `calibration.yaml` in the run folder, so from `chirp_all.py` runs), and the RMS error of the servo model
+  and of the best linear model;
+- flags: `clipped` (the joint stops short of the command, so the fit measures contact, not the free actuator) and
+  `ramp differs` (more than 10% from the prediction). Flagged joints are left out of the sim values;
+- the sim values: `ORCA_V2_SERVO_ACCEL` per joint group, and the actuator's dead time + lag for the fingers/thumb
+  and the wrist.
 
-The chirp is scored up to 2.5 Hz (`--max-chirp-hz`). Above that the ramp saturates completely, and the
-servo runs bang-bang: a 0.5 % change of the ramp then changes the trajectory by degrees, so no model can
-be scored there.
+The chirp is scored up to 2.5 Hz (`--max-chirp-hz`). Above that the ramp saturates completely and the servo runs
+bang-bang: a 0.5% change in the ramp changes the trajectory by degrees, so no model can be scored there.
 
-Stiffness, damping, friction and the effort limit cannot be identified from free-motion chirps: once the
-ramp and the dead time are in the model, stiffness 30, 60 and 120 with the same damping/stiffness ratio
-give the same response. In the sim, the joint behaves as a first-order lag with time constant D/K, so only
-D/K matters for these data. Set it so that `delay_substeps / 120 s + D/K` equals the fitted dead time + lag.
+Stiffness, damping, friction and the effort limit cannot be identified from free-motion chirps. Once the ramp and the
+dead time are in the model, stiffness 30, 60 and 120 with the same damping/stiffness ratio give the same response. In
+the sim the joint behaves as a first-order lag with time constant D/K, so only D/K matters for these data. Set it so
+that `delay_substeps / 120 s + D/K` equals the fitted dead time + lag.
 
-## Use the recording in faive_lab SysID
-
-[faive_lab SysID guide](https://github.com/srl-ethz/faive_lab/blob/rwr2026/scripts/sysid/README.md)
-
-For the fit commands, see "The hand" in the [main README](../../README.md).
+For the faive_lab side, see the [faive_lab SysID guide](https://github.com/srl-ethz/faive_lab/blob/rwr2026/scripts/sysid/README.md)
+and "The hand" in the [main README](../../README.md).
 
 ## Troubleshooting
 
-**Serial connection:** list devices, then set `port` in your config if auto
-detection fails:
-
-```bash
-python -m serial.tools.list_ports
-```
-
-**Check the plan without motion:**
-
-```bash
-python experiments/orca/chirp.py \
-  --config /path/to/your/config.yaml --joints index_mcp --dry-run
-```
-
-**Check one joint with a small amplitude:**
-
-```bash
-python experiments/orca/chirp.py \
-  --config /path/to/your/config.yaml \
-  --joints index_mcp --amplitude-deg 3 --execute
-```
+- **Serial port not found or wrong device:** list the devices and set `port` in `config.yaml`:
+  `python -m serial.tools.list_ports`.
+- **"A complete calibration.yaml ... is required":** calibrate first. For `chirp.py`, check that `--config` points
+  at a real folder that holds both files (see Setup).
+- **"center +/- amplitude or step exceeds ROM":** lower `--amplitude-deg` or the largest `--steps-deg`, or move
+  `--center-deg`. In minimum-gap mode, also lower `--abd-gap-deg`.
+- **"Missed a full control period":** the bus is too slow for the commands. Close other programs on the port, or
+  lower `--read-hz`.
+- **Old runs with long CSV names:** `rename_chirp_results.py <run>` previews shorter names; `--apply` renames them.
