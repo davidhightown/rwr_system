@@ -47,26 +47,7 @@ On macOS, you can use the `rwr_jazzy` environment instead (see the
 
 ## Record all joints
 
-## What the hand does with a command
-
-The Feetech servos do not jump to a goal position. Each runs its own trapezoidal trajectory toward it,
-limited by its acceleration register (ACC). At ACC 150 that is 22.8 rad/s^2 at the motor, about
-22-30 rad/s^2 at a finger or thumb joint (the motor-per-joint ratio in `calibration.yaml`), and about 12 at
-the wrist. A 10° chirp needs more than that above about 1.8 Hz. The ramp sits behind a dead time of about
-40 ms, from the command write to the motor encoder. Together the two explain the recorded chirps to
-0.1-0.5° RMS (up to 2.5 Hz). A linear model (a PD joint with any stiffness and damping, plus a delay) cannot
-reproduce them. The goal current (900 mA) caps the torque. A free-moving joint never reaches it, but a joint
-pushing against something does.
-
-orca_core writes its own ACC (150) in `init_joints`. `config.yaml` now sets it explicitly
-(`servo_acceleration_raw`). Both the recorder and the ROS hand controller write it after `init_joints`, read
-it back, and refuse to run if a motor does not hold it (`src/hand_control/orca/servo_profile.py`). Chirps
-and deployment therefore always run the same ramp, and each run records it in `metadata.json`. If you
-change it, record new chirps and refit before you deploy.
-
-## Record all joints
-
-`chirp_all.py` records all 17 joints in one run (about 8 minutes), so you can
+`chirp_all.py` records all 17 joints in one run (about 6 minutes), so you can
 fit one finger and use the other three to find outliers and measure the spread:
 
 ```bash
@@ -82,27 +63,6 @@ need the copy from step 2 above. The sweep options are the same as for `chirp.py
 By default each joint ramps to its first chirp sample over about 1 s. `--no-ramp` skips this: the
 joint jumps there at full motor speed and the previous joint snaps back to neutral. `metadata.json`
 records the choice under `ramp_to_start`. The initial move to neutral at startup still ramps.
-
-**Neighbouring fingers.** With all other fingers at neutral, an abduction sweep runs into the next finger. On
-the 2026-11 runs, ring_abd stopped about 6° short on the middle-finger side, and middle_abd on both sides.
-During a finger's abduction sweep, the other fingers therefore spread outward. Each moves just enough to stay
-`--abd-gap-deg` (default 8°) from the next finger inward, at the extremes of the sweep. If a neighbour would leave
-its ROM, the sweep center moves toward the free side instead (for example, pinky_abd sweeps about +13°). The plan
-prints the centers and the poses (`centers_deg`, `neighbour_pose`), so check them with a dry run. On a new hand,
-check them once with a small amplitude. `--abd-gap-deg 0` restores neutral neighbours. This assumes positive
-abduction points toward the pinky, which the script checks against the neutral pose. Flexion sweeps keep the
-other fingers at neutral.
-
-After the run, the table flags `stops short -` / `stops short +`: the joint fell more than 1.5° short of
-the command on that side below 1 Hz, where the servo dynamics cost well under a degree. A shortfall on one side
-means something stops it there. On the 2026-11 runs, the middle/ring/pinky PIPs fall short by a similar amount on
-both sides, with the neighbours at neutral. That points at the joint's own load (the motor stalls at its current
-limit) rather than a collision. The motor current in `fast_*.csv` shows which.
-
-After each chirp, `chirp_all.py` steps the joint by ±2°, ±6° and ±12° about the center (0.6 s each,
-`--steps-deg`, `--step-hold`). Small steps show the dead time and large steps the ramp, without a
-fit. Between the 20 Hz commands both scripts read the hand at 100 Hz (`--read-hz`), the read rate of the
-deployment controller, so the bus carries the same load.
 
 `--finger` (default `middle`) only saves the finger meant for the fit in
 `metadata.json`, under `fit_finger` and `fit_joints`, so you can still fit another finger later.
@@ -149,13 +109,8 @@ Each run creates a directory under `logs/chirp_v2/` (`--output-dir` to change):
 ```text
 logs/chirp_v2/<timestamp>/
 ├── metadata.json
-├── chirp_<joint>_*.csv   # one CSV per selected joint: the read right after each 20 Hz command
-├── fast_<joint>_*.csv    # every read at --read-hz, with the motor's velocity (rad/s) and current (mA)
-└── steps_<joint>_*.csv   # the steps, same columns as fast_ (with --steps-deg)
+└── chirp_<joint>_*.csv   # one CSV per selected joint
 ```
-
-`metadata.json` also records the servo ramp each motor held (`servo_profile`) and the servos' own
-position-loop gains (`servo_gains`).
 
 `chirp_all.py` adds the suffix above to the folder, and also saves `config.yaml`, `calibration.yaml` and
 `overview.png` in it. The timestamp in the folder name is in UTC. `metadata.json` includes the motor
@@ -183,34 +138,6 @@ python experiments/orca/plot.py /path/to/recording.csv --save
 The PNG is saved in the current directory. On a headless machine, prefix
 the command with `MPLBACKEND=Agg`. Plotting does not change the CSVs or SysID
 settings; see `plot.py --help` for trim and alignment options.
-
-## Fit the servo model
-
-```bash
-python experiments/orca/fit_servo.py logs/chirp_v2/<run>_good
-```
-
-It fits the dead time and the ramp of every joint, in the time domain, in about 30 s without Isaac. It also
-fits a linear model for comparison. It writes `servo_fit.json` and `servo_fit.png` into the run folder and
-prints:
-
-- per joint: the dead time, the fitted ramp, the ramp that ACC and the calibration predict, and the RMS error
-  of the servo model and of the best linear model;
-- flags: `clipped` (the joint stops short of the command: a neighbouring finger, a coupled tendon or the
-  current limit, so it measures contact, not the free actuator) and `ramp differs` (more than 10 % from
-  the prediction). Flagged joints are left out of the sim values. On the 2026-11-05 runs (recorded before
-  the neighbour clearance existed), middle/ring abd and middle/pinky pip clip; the index finger does not;
-- the sim values: `ORCA_V2_SERVO_ACCEL` per joint group, and the actuator's dead time + lag for the
-  fingers/thumb and the wrist.
-
-The chirp is scored up to 2.5 Hz (`--max-chirp-hz`). Above that the ramp saturates completely, and the
-servo runs bang-bang: a 0.5 % change of the ramp then changes the trajectory by degrees, so no model can
-be scored there.
-
-Stiffness, damping, friction and the effort limit cannot be identified from free-motion chirps: once the
-ramp and the dead time are in the model, stiffness 30, 60 and 120 with the same damping/stiffness ratio
-give the same response. In the sim, the joint behaves as a first-order lag with time constant D/K, so only
-D/K matters for these data. Set it so that `delay_substeps / 120 s + D/K` equals the fitted dead time + lag.
 
 ## Use the recording in faive_lab SysID
 

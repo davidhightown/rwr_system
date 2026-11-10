@@ -12,7 +12,6 @@ adds the answer to the folder name:
 
 from datetime import datetime, timezone
 import json
-import math
 from pathlib import Path
 import shutil
 import subprocess
@@ -36,17 +35,12 @@ FINGER_JOINTS = ["abd", "mcp", "pip"]
 SHORTFALL_MARGIN = 0.25
 # Mean sample period may differ this much from the commanded one.
 TIMING_MARGIN = 0.05
-# A joint more than this many degrees short of the command below 1 Hz is stopped by something (see short_sides).
-SHORT_DEG = 1.5
 
 
 def make_parser():
     parser = chirp.make_parser()
     parser.description = __doc__
-    # Steps after each chirp (about 8 s per joint) show the dead time and the ramp directly; --steps-deg with no
-    # values turns them off.
-    # (12 is the largest step for which the other fingers can still clear every abduction sweep at --abd-gap-deg 8.)
-    parser.set_defaults(config=INSTALLED_CONFIG, joints=None, steps_deg=[2.0, 6.0, 12.0])
+    parser.set_defaults(config=INSTALLED_CONFIG, joints=None)
     parser.add_argument("--finger", choices=FINGERS, default="middle",
                         help="Finger meant for the fit, saved in metadata.json. All fingers are recorded.")
     parser.add_argument("--notes", default="",
@@ -91,24 +85,6 @@ def read_recording(path):
     return data if data.size else None
 
 
-def short_sides(data, metadata):
-    """'stops short -' / '+' where the joint falls more than SHORT_DEG short of the command below 1 Hz.
-
-    Below 1 Hz the servo's ramp and dead time cost well under a degree of amplitude, so a larger shortfall on one
-    side means something stops the joint there: usually a neighbouring finger. Equal shortfalls on both sides
-    point at the motor's own load (it stalls at its current limit), not at a collision.
-    """
-    f0, f1 = metadata.get("f0_hz", 0.1), metadata.get("f1_hz", 5.0)
-    end = metadata.get("duration_s", 20.0) * math.log(max(min(1.0, f1), f0) / f0) / math.log(f1 / f0)
-    slow = (data[:, 0] > 1.0) & (data[:, 0] < end)
-    if slow.sum() < 20:
-        return []
-    commanded, measured = data[slow, 1], data[slow, 2]
-    low = np.percentile(measured, 2) - np.percentile(commanded, 2)
-    high = np.percentile(commanded, 98) - np.percentile(measured, 98)
-    return [f"stops short {sign} ({value:.1f} deg)" for sign, value in (("-", low), ("+", high)) if value > SHORT_DEG]
-
-
 def summarize(run_dir, metadata, short):
     summary = {}
     period = 1.0 / metadata["ctrl_freq_hz"]
@@ -127,7 +103,6 @@ def summarize(run_dir, metadata, short):
             flags.append("low motion")
         if len(data) > 1 and abs(mean_period - period) > TIMING_MARGIN * period:
             flags.append("timing")
-        flags += short_sides(data, metadata)
         if joint in short:
             flags.append("short travel")
         summary[joint] = dict(data=data, samples=len(data), moved=moved, period_ms=mean_period * 1e3, flags=flags)
@@ -239,8 +214,7 @@ def main(argv=None, *, factory=None, clock=time.monotonic, sleep=time.sleep):
                 calibration_modified_at_utc=modified.isoformat())
 
     print(json.dumps({key: value for key, value in plan.items() if key != "config"}, indent=2))
-    step_seconds = len(chirp.step_targets(args, 0.0)) / args.ctrl_freq if args.steps_deg else 0.0
-    minutes = len(args.joints) * (args.duration + args.settle_time + 1 + step_seconds) / 60
+    minutes = len(args.joints) * (args.duration + args.settle_time + 1) / 60
     print(f"About {minutes:.0f} min for {len(args.joints)} joints.")
     short = short_travel(calibration)
     for joint, (travel, median) in short.items():
