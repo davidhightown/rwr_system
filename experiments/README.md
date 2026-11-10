@@ -93,23 +93,52 @@ The launch file also takes `use_cube_pose`, `goal_ang_vel` and `goal_flip_period
 
 ### Evaluate policies on the real hand
 
-`rl_inference/run_real_evaluation.sh` tests policies without the cube pose one after another and counts the cube's turns with the camera. It starts the camera with the cube detector, the hand controller, the live view (topic `/real_eval/view`, opened in `rqt_image_view`) and one policy node per run. It does not need the camera calibration: it counts in the camera's frame. It does need the detector's model files (see [Detect the cube](#detect-the-cube)).
+`rl_inference/run_real_evaluation.sh` tests policies one after another on the real hand and counts the cube's turns with the camera. It is for policies **without the cube pose** (task `orca-v2-inhand-repose-v0`, 74 observations, exported as in [Run a faive_lab policy on the hand](#run-a-faive_lab-policy-on-the-hand)). One command starts everything: the camera with the cube detector, the hand controller, a window with the live view (topic `/real_eval/view` in `rqt_image_view`) and, for each run, the policy node. The camera calibration is not needed, because the turns are counted in the camera's frame.
 
-1. Put each policy in its own folder with its `policy.pt`, and list the folders in a `models.json` in the parent folder (default `~/policies/real_test`; `--models-dir` for another), newest first:
-    ```json
-    [{"idx": 6, "name": "wombat", "dir": "/path/to/06_wombat", "goal": 1.5}]
-    ```
-    `goal` is the test speed in rad/s (`--speed` sets one for all).
-2. Check the camera first. Only the camera starts, and the hand does not move: `experiments/rl_inference/run_real_evaluation.sh --live`, then turn the cube by hand in view of the camera. The count should follow, and the view shows the detections per second.
-3. Place the cube in the palm and run `experiments/rl_inference/run_real_evaluation.sh` (or `--models 06 20`). **The hand moves at start-up** to the start pose: the config's neutral pose with the wrist at `--start-wrist-deg` (30).
+**Before the first use**
+- The ROS workspace is set up and built (see the [main README](../README.md)). The script expects the pixi workspace to be the folder that contains `src/rwr_system`, e.g. `~/ros_ws`; set `ROS_WS=/path/to/ros_ws` if yours is elsewhere. It starts everything through `pixi run` itself.
+- The hand is calibrated (see [src/hand_control/README.md](../src/hand_control/README.md)).
+- The detector's model files are downloaded: `rl_inference/pose_estimation/download_models.sh`.
+- The camera is connected and looks down at the palm. The camera named in `cfgs/cams/oakd_cube_task.yaml` is used; if that one is not connected, the only connected OAK-D is used instead. `--camera-id <ID>` chooses one (the camera's log lists the connected IDs).
 
-For each model, the script waits until every motor is below 50 °C (`--start-temp`), asks you to start, and runs for 60 s (`--duration`). A run ends early when the cube falls, when it is not detected for 5 s, when a motor reaches 58 °C (`--abort-temp`), when the camera, the hand controller or the policy stops, or when you press Enter. The script then moves the hand back to the start pose, switches the torque off so that the motors cool down, and asks whether to save the run, repeat it or go to the next model. A stopped camera or hand controller is restarted.
+**1. List the policies.** Put each `policy.pt` in its own folder (any name), and list the folders in `models.json` in the parent folder. The default parent folder is `~/policies/real_test`; `--models-dir` sets another.
+```json
+[
+  {"idx": 7, "name": "koala", "dir": "/home/me/policies/real_test/07_koala", "goal": 1.5},
+  {"idx": 6, "name": "wombat", "dir": "/home/me/policies/real_test/06_wombat", "goal": -1.0}
+]
+```
+- The models are tested in the order of the file (`--oldest-first` reverses it).
+- `goal` is the commanded spin speed in rad/s; the sign is the direction. `--speed` uses one speed for all models.
+- `--models 06 koala` tests only these: the number is `idx` with two digits, or the `name`.
 
-Results go to `<models-dir>/eval_<date_time>/` (`--out` with an earlier folder continues it):
-- `results.csv` (every run) and `summary.md` (the saved runs): turns, rad/s, turns after 30 s, the best 10 s, the longest stall, tracking quality, joint delay, joints that barely move, the highest temperature and warnings. A warning (little tracking, `--min-tracked`; long gaps, `--max-gap`; many rejected poses) means the count may be wrong.
-- One folder per run: `video.mp4` (the live view), `turns_vs_time.png`, `joints.png` (commanded and measured joints), `trace.csv`, `joints.csv`, `joint_tracking.csv`, `temperatures.csv`, `policy_node.log` and `meta.json` (git commit, policy hash, options, start temperatures, result).
+**2. Check the camera.** From the repository folder (`rwr_system`), run:
+```bash
+experiments/rl_inference/run_real_evaluation.sh --live
+```
+Only the camera starts; the hand does not move. Turn the cube by hand in front of the camera. The terminal shows the turns (counterclockwise seen from above counts up) and the poses per second, and the live view draws the detected cube. If the count runs backwards, the camera looks the other way: add `--axis-sign 1` to every command. Stop with Ctrl+C.
 
-The camera is the one in `cfgs/cams/oakd_cube_task.yaml`. If that one is not connected, the only connected OAK-D is used instead; `--camera-id <ID>` chooses one (`camera_id:=<ID>` for `cube_spin_v2.launch.py`). `--exposure-us 5000` fixes the camera's exposure time for less motion blur (0: auto exposure, `--iso` sets the sensitivity). Compare the detections per second with `--live`. `--help` lists all options. `rl_inference/real_eval/test_offline.py` tests the turn counting and the analysis without hardware (run it with `pixi run python`).
+**3. Run the evaluation.** Keep the palm empty, then run:
+```bash
+experiments/rl_inference/run_real_evaluation.sh
+```
+**The hand moves after 5 s** to the start pose (the config's neutral pose with the wrist at `--start-wrist-deg`, 30 deg) and the torque is then switched off. `--pose-only` only does this and exits. For each model, the script then:
+
+1. asks `Put the cube in the palm. Enter = start, n = next model, q = quit`,
+2. waits until every motor is below 50 °C (`--start-temp`) and the cube lies still,
+3. switches the torque on and runs the policy for 60 s (`--duration`). Press Enter to stop a run early. A run also ends when the cube falls, when it is not detected for 5 s, when a motor reaches 58 °C (`--abort-temp`), or when the camera, the hand controller or the policy stops. A stopped camera or hand controller is restarted,
+4. moves the hand back to the start pose, switches the torque off, prints the result and asks `Enter = save and next model, r = run again, n = next model without saving, q = quit`. After a run that was interrupted (stopped by you, too hot, camera, controller or policy stopped), it asks `Enter = run again, n = next model, q = quit` instead.
+
+Ctrl+C at any time stops everything and leaves the hand in the start pose with the torque off.
+
+**Results** go to `<models-dir>/eval_<date_time>/`. To continue an evaluation later, pass that folder with `--out`: the models already saved there are skipped.
+- `results.csv` has one row per run (also the ones not saved), and `summary.md` has the saved runs. They list the turns (positive = counterclockwise seen from above, the direction of a positive `goal`), the mean speed, the turns after 30 s, the fastest 10 s, the longest time without progress, how much of the run the cube was tracked, the joints' delay and the joints that barely follow their commands, the highest motor temperature and warnings. A warning means the count may be wrong: the cube was tracked for less than half of the run (`--min-tracked`), it was not detected for more than 3 s (`--max-gap`), or many poses were rejected. Run such a run again with `r`.
+- Each run has its own folder: `video.mp4` (the live view), `turns_vs_time.png`, `joints.png` (commanded and measured angle of every joint), `trace.csv` (cube poses), `joints.csv`, `joint_tracking.csv` (delay and error per joint), `temperatures.csv`, `policy_log.csv` and `policy_node.log` (the policy node), and `meta.json` (git commit, policy file hash, options, start temperatures and the result).
+
+**Options**
+- `--exposure-us 5000` fixes the camera's exposure time for less motion blur (0, the default: auto exposure; `--iso` sets the sensitivity). Compare the poses per second with `--live`.
+- `--help` lists all options.
+- `rl_inference/real_eval/test_offline.py` tests the turn counting and the analysis without hardware: `pixi run python src/rwr_system/experiments/rl_inference/real_eval/test_offline.py` from the workspace folder.
 
 ### Troubleshooting
 
