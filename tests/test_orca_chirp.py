@@ -620,3 +620,71 @@ def test_servo_acceleration_that_does_not_read_back_stops_the_run(experiment):
         run(experiment)
     assert not list(next(args.output_dir.iterdir()).glob("*.csv"))
     assert hand.events[-2:] == ["disable", "disconnect"]
+
+
+ABD = [f"{finger}_abd" for finger in chirp.FINGERS]
+
+
+@pytest.mark.parametrize("steps", [[], [2.0, 6.0, 12.0]])
+def test_abduction_sweeps_keep_the_other_fingers_clear(steps):
+    """Every abduction sweep, with chirp_all's steps too, keeps adjacent fingers >= gap apart inside their ROMs."""
+    args = chirp.make_parser().parse_args(["--joints", *ABD, "--steps-deg", *map(str, steps)])
+    config = yaml.safe_load(args.config.read_text())
+    plan = chirp.make_plan(args, config)
+    reach = max([args.amplitude_deg, *steps])
+    for joint in ABD:
+        center = plan["centers_deg"][joint]
+        pose = {name: config["neutral_position"][name] for name in ABD}
+        pose.update(plan["neighbour_pose"][joint])
+        for extreme in (center - reach, center + reach):
+            pose[joint] = extreme
+            angles = [pose[name] for name in ABD]
+            assert all(b - a >= args.abd_gap_deg - 1e-9 for a, b in zip(angles, angles[1:])), (joint, pose)
+        for name, target in plan["neighbour_pose"][joint].items():
+            lower, upper = config["joint_roms"][name]
+            assert lower + chirp.ROM_MARGIN_DEG <= target <= upper - chirp.ROM_MARGIN_DEG
+    # the ring finger was stopped by the middle finger at neutral: the middle finger now moves out of its way
+    assert plan["neighbour_pose"]["ring_abd"]["middle_abd"] < config["neutral_position"]["middle_abd"]
+    # flexion sweeps leave the other fingers at neutral and keep the ROM midpoint
+    flex = chirp.make_plan(chirp.make_parser().parse_args(["--joints", "ring_pip"]), config)
+    assert flex["neighbour_pose"]["ring_pip"] == {} and flex["centers_deg"]["ring_pip"] == 46
+
+
+def test_gap_zero_restores_neutral_neighbours_and_rom_midpoint():
+    args = chirp.make_parser().parse_args(["--joints", *ABD, "--abd-gap-deg", "0"])
+    config = yaml.safe_load(args.config.read_text())
+    plan = chirp.make_plan(args, config)
+    assert all(pose == {} for pose in plan["neighbour_pose"].values())
+    assert plan["centers_deg"] == {j: sum(config["joint_roms"][j]) / 2 for j in ABD}
+
+
+def test_infeasible_clearance_and_unexpected_abduction_direction_are_rejected():
+    config = yaml.safe_load(chirp.DEFAULT_CONFIG.read_text())
+    with pytest.raises(ValueError, match="abd-gap-deg"):
+        chirp.make_plan(chirp.make_parser().parse_args(["--joints", "middle_abd", "--steps-deg", "18"]), config)
+    flipped = dict(config, neutral_position=dict(config["neutral_position"], index_abd=30))
+    with pytest.raises(ValueError, match="does not increase"):
+        chirp.make_plan(chirp.make_parser().parse_args(["--joints", "index_mcp"]), flipped)
+    chirp.make_plan(chirp.make_parser().parse_args(["--joints", "index_mcp", "--abd-gap-deg", "0"]), flipped)
+
+
+def test_neighbours_hold_their_clearance_pose_during_the_sweep(experiment):
+    args, plan, clock, hand = experiment
+    args.joints = ["ring_abd"]
+    plan = chirp.make_plan(args, plan["config"])
+    run((args, plan, clock, hand))
+    pose = plan["neighbour_pose"]["ring_abd"]
+    assert pose and hand.command_kwargs[0]  # the first move ramps the neighbours too
+    for command in hand.commands:
+        for name, target in pose.items():
+            assert command[name] == target
+
+
+def test_chirp_all_flags_the_side_a_joint_stops_short():
+    t = np.arange(0, 20, 0.05)
+    commanded = 10 * np.sin(2 * np.pi * 0.3 * t)
+    metadata = dict(f0_hz=0.1, f1_hz=5.0, duration_s=20.0)
+    blocked = np.column_stack([t, commanded, np.maximum(commanded, -4.0)])  # a neighbour at -4 deg
+    assert chirp_all.short_sides(blocked, metadata) == ["stops short - (6.0 deg)"]
+    free = np.column_stack([t, commanded, 0.97 * commanded])
+    assert chirp_all.short_sides(free, metadata) == []

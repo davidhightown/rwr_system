@@ -35,6 +35,52 @@ DEFAULT_CONFIG = (
 )
 CSV_FIELDS = ["timestamp", "commanded_position", "measured_position"]
 FAST_CSV_FIELDS = CSV_FIELDS + ["motor_velocity", "motor_current"]
+FINGERS = ["index", "middle", "ring", "pinky"]  # thumb side to little-finger side
+ROM_MARGIN_DEG = 2.0  # neighbours are never sent closer than this to their ROM limits
+
+
+def finger_layout(config, joint, center, reach, gap):
+    """Abduction targets of the other fingers while ``joint`` sweeps center +/- reach.
+
+    Positive abduction points toward the pinky (config.yaml's neutral pose fans out from -14 at the index to
+    +22 at the pinky). Adjacent fingers touch when their abduction angles get too close: on the 2026-11 runs
+    ring_abd stopped about 6 deg short on the middle-finger side, and middle_abd on both sides. Each neighbour is
+    therefore pushed outward from neutral just enough to stay ``gap`` degrees from the next finger inward.
+    Returns {joint: target} for the neighbours that move ({} for a non-abduction joint or gap 0), or None if
+    a neighbour would have to leave its ROM.
+    """
+    if gap <= 0 or not joint.endswith("_abd") or joint.split("_")[0] not in FINGERS:
+        return {}
+    roms, neutral = config["joint_roms"], config["neutral_position"]
+    tested = FINGERS.index(joint.split("_")[0])
+    targets = {}
+    bound = center - reach - gap
+    for k in range(tested - 1, -1, -1):
+        name = f"{FINGERS[k]}_abd"
+        target = min(neutral[name], bound)
+        if target < roms[name][0] + ROM_MARGIN_DEG:
+            return None
+        if target != neutral[name]:
+            targets[name] = target
+        bound = target - gap
+    bound = center + reach + gap
+    for k in range(tested + 1, len(FINGERS)):
+        name = f"{FINGERS[k]}_abd"
+        target = max(neutral[name], bound)
+        if target > roms[name][1] - ROM_MARGIN_DEG:
+            return None
+        if target != neutral[name]:
+            targets[name] = target
+        bound = target + gap
+    return targets
+
+
+def check_abduction_convention(config):
+    """The layout assumes positive abduction toward the pinky; neutral must fan out that way."""
+    angles = [config["neutral_position"][f"{finger}_abd"] for finger in FINGERS]
+    if any(b <= a for a, b in zip(angles, angles[1:])):
+        raise ValueError(f"neutral abduction {dict(zip(FINGERS, angles))} does not increase from index to pinky; "
+                         "finger_layout's direction assumption does not hold. Use --abd-gap-deg 0.")
 
 
 def make_parser():
@@ -58,6 +104,10 @@ def make_parser():
                         help="After each chirp, steps of these sizes about the center (+s, back, -s, back), "
                              "streamed at --ctrl-freq. They show the dead time and the acceleration ramp directly.")
     parser.add_argument("--step-hold", type=float, default=0.6, help="Seconds to hold each step target.")
+    parser.add_argument("--abd-gap-deg", type=float, default=8.0,
+                        help="During a finger's abduction sweep, spread the other fingers so adjacent abduction "
+                             "angles stay at least this far apart (moving the sweep center toward the free side "
+                             "if needed). 0: other fingers stay at neutral, sweep at the ROM midpoint.")
     parser.add_argument("--settle-time", type=float, default=1.0)
     parser.add_argument("--no-ramp", action="store_true",
                         help="Jump straight to each joint's first chirp sample instead of ramping for about 1 s. "
@@ -105,19 +155,41 @@ def make_plan(args, config):
         if lower >= upper or not lower <= position <= upper:
             raise ValueError(f"Invalid ROM or neutral position for {joint}")
 
+    if not math.isfinite(args.abd_gap_deg) or args.abd_gap_deg < 0:
+        raise ValueError("abd_gap_deg must be finite and non-negative")
+    if args.abd_gap_deg > 0:
+        check_abduction_convention(config)
     reach = max([args.amplitude_deg, *args.steps_deg])
-    centers = {}
+    centers, neighbours = {}, {}
     for joint in args.joints:
         lower, upper = roms[joint]
-        center = (lower + upper) / 2 if args.center_deg is None else args.center_deg
-        if not math.isfinite(center) or center - reach < lower or center + reach > upper:
-            raise ValueError(f"{joint}: center +/- amplitude or step exceeds ROM [{lower}, {upper}]")
-        centers[joint] = center
+        middle = (lower + upper) / 2
+        if args.center_deg is not None:
+            candidates = [args.center_deg]
+        else:
+            # The ROM midpoint, else the closest center (0.5 deg grid) at which the neighbouring fingers can clear
+            # the sweep: an outer finger's abduction moves toward its free side.
+            grid = np.arange(lower + reach, upper - reach + 1e-9, 0.5).tolist()
+            candidates = sorted([middle] + grid, key=lambda c: abs(c - middle))
+        chosen = None
+        for center in candidates:
+            if not math.isfinite(center) or center - reach < lower or center + reach > upper:
+                continue
+            layout = finger_layout(config, joint, center, reach, args.abd_gap_deg)
+            if layout is not None:
+                chosen = (center, layout)
+                break
+        if chosen is None:
+            raise ValueError(f"{joint}: center +/- amplitude or step exceeds ROM [{lower}, {upper}], or the "
+                             f"neighbouring fingers cannot keep {args.abd_gap_deg:g} deg clear (--abd-gap-deg)")
+        centers[joint], neighbours[joint] = chosen
     return {
         "config_path": str(args.config.resolve()),
         "config": config,
         "joints": args.joints,
         "centers_deg": centers,
+        "abd_gap_deg": args.abd_gap_deg,
+        "neighbour_pose": neighbours,
         "ctrl_freq_hz": args.ctrl_freq,
         "read_hz": args.read_hz,
         "duration_s": args.duration,
@@ -217,6 +289,8 @@ def collect_joint(hand, args, plan, joint, paths, *, clock=time.monotonic, sleep
     )
     motor_index = joint_motor_index(plan["config"], joint)
     command = dict(plan["config"]["neutral_position"])
+    # Neighbouring fingers spread out of the way of an abduction sweep (the ramp below moves them too).
+    command.update(plan.get("neighbour_pose", {}).get(joint, {}))
     command[joint] = float(trajectory[0])
     if args.no_ramp:
         hand.set_joint_positions(command)

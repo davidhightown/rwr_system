@@ -83,7 +83,23 @@ By default each joint ramps to its first chirp sample over about 1 s. `--no-ramp
 joint jumps there at full motor speed and the previous joint snaps back to neutral. `metadata.json`
 records the choice under `ramp_to_start`. The initial move to neutral at startup still ramps.
 
-After each chirp, `chirp_all.py` steps the joint by ±2°, ±6° and ±18° about the center (0.6 s each,
+**Neighbouring fingers.** With all other fingers at neutral, an abduction sweep runs into the next finger. On
+the 2026-11 runs, ring_abd stopped about 6° short on the middle-finger side, and middle_abd on both sides.
+During a finger's abduction sweep, the other fingers therefore spread outward. Each moves just enough to stay
+`--abd-gap-deg` (default 8°) from the next finger inward, at the extremes of the sweep. If a neighbour would leave
+its ROM, the sweep center moves toward the free side instead (for example, pinky_abd sweeps about +13°). The plan
+prints the centers and the poses (`centers_deg`, `neighbour_pose`), so check them with a dry run. On a new hand,
+check them once with a small amplitude. `--abd-gap-deg 0` restores neutral neighbours. This assumes positive
+abduction points toward the pinky, which the script checks against the neutral pose. Flexion sweeps keep the
+other fingers at neutral.
+
+After the run, the table flags `stops short -` / `stops short +`: the joint fell more than 1.5° short of
+the command on that side below 1 Hz, where the servo dynamics cost well under a degree. A shortfall on one side
+means something stops it there. On the 2026-11 runs, the middle/ring/pinky PIPs fall short by a similar amount on
+both sides, with the neighbours at neutral. That points at the joint's own load (the motor stalls at its current
+limit) rather than a collision. The motor current in `fast_*.csv` shows which.
+
+After each chirp, `chirp_all.py` steps the joint by ±2°, ±6° and ±12° about the center (0.6 s each,
 `--steps-deg`, `--step-hold`). Small steps show the dead time and large steps the ramp, without a
 fit. Between the 20 Hz commands both scripts read the hand at 100 Hz (`--read-hz`), the read rate of the
 deployment controller, so the bus carries the same load.
@@ -182,8 +198,8 @@ prints:
   of the servo model and of the best linear model;
 - flags: `clipped` (the joint stops short of the command: a neighbouring finger, a coupled tendon or the
   current limit, so it measures contact, not the free actuator) and `ramp differs` (more than 10 % from
-  the prediction). Flagged joints are left out of the sim values. On the 2026-11-05 runs, middle/ring abd
-  and middle/pinky pip clip; the index finger does not;
+  the prediction). Flagged joints are left out of the sim values. On the 2026-11-05 runs (recorded before
+  the neighbour clearance existed), middle/ring abd and middle/pinky pip clip; the index finger does not;
 - the sim values: `ORCA_V2_SERVO_ACCEL` per joint group, and the actuator's dead time + lag for the
   fingers/thumb and the wrist.
 
