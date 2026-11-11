@@ -237,7 +237,8 @@ def test_which_models_are_tested(tmp_path):
 def meta_of(model="ibex", goal=2.0, outcome="completed", drops=0, start=30.0):
     return dict(model=model, time="2026-11-11 22:15:25", policy_file=f"models/{model}_policy.pt",
                 policy_sha256="abc", policy_sha256_full="abcdef", host="mac", goal_rad_s=goal, outcome=outcome,
-                active_s=60.0, turns=4.2, turns_before_first_drop=1.5, drops=drops, temp_max_start_c=start,
+                active_s=60.0, turns=4.2, turns_before_first_drop=1.5 if drops else 4.2,
+                duration_before_first_drop_s=20.0 if drops else 60.0, drops=drops, temp_max_start_c=start,
                 heating_max_c_per_min="", servo_errors="", git_commit="1d18a28+changes", hand_config_sha256="h",
                 options=dict(duration="60.0", start_wrist_deg="33.0", temp_limit="60.0"))
 
@@ -253,30 +254,39 @@ def test_config_and_summary_in_the_other_evaluations_format(tmp_path):
     assert c["eval"]["start_wrist_deg"] == 33.0 and c["eval"]["session"] == "real_eval"
     assert c["code"] == dict(commit="1d18a28", uncommitted_changes=True, hand_config_sha256="h")
     new = wr.config_of(meta_of(model="lark"), run_dir, known)
-    assert new["model"]["name"] == "lark" and new["model"]["idx"] is None and new["eval"]["at_own_goal"] is True
+    assert new["model"]["name"] == "lark" and new["model"]["idx"] is None
+    assert new["eval"]["own_goal_rad_s"] == 2.0 and new["eval"]["at_own_goal"] is True  # its first runs set its goal
 
-    s = wr.summary_of(meta_of(drops=2))
-    assert s["result/turns"] == 4.2 and s["cube/turns_camera_axis"] == 4.2 and s["result/stop_reason"] == "time"
+    s = wr.summary_of(meta_of(drops=2))  # as the other evaluation: up to the first drop
+    assert s["result/turns"] == 1.5 and s["result/duration_s"] == 20.0 and s["cube/turns_camera_axis"] == 1.5
+    assert s["result/turns_total"] == 4.2 and s["result/duration_total_s"] == 60.0 and s["result/stop_reason"] == "time"
     assert s["result/dropped"] is True and s["result/full_60s"] is False
     assert "hand/heating_max_c_per_min" not in s and s["hand/servo_errors"] == ""
     assert wr.summary_of(meta_of())["result/full_60s"] is True
     assert wr.run_id(meta_of(), run_dir) == wr.run_id(meta_of(), tmp_path / "moved" / run_dir.name)
 
 
-def test_leaderboard_per_model_and_evaluator():
+def test_leaderboard_per_model_over_both_evaluations():
     records = [record("48_ibex", "ibex", turns=13.0, started="a"), record("48_ibex", "ibex", turns=11.0, started="b"),
                record("48_ibex", "ibex", goal=2.2, turns=15.0),                      # not at its own goal
                record("48_ibex", "ibex", start=50.0, turns=1.0),                     # not a cold start
-               record("48_ibex", "ibex", turns=4.0, evaluator="eval_policies.py", completed=False),
-               record("lark", "lark", own=None, goal=2.0, turns=6.0, evaluator="eval_policies.py")]
-    records[-1]["config"]["eval"]["at_own_goal"] = True
+               record("48_ibex", "ibex", turns=6.0, evaluator="eval_policies.py", started="c", completed=False),
+               record("lark", "lark", goal=2.0, own=2.0, turns=8.0, evaluator="eval_policies.py")]
     rows = wr.leaderboard_rows(records)
-    assert [(r["model"], r["evaluator"]) for r in rows] == [
-        ("48_ibex", "evaluate_real_policies.py"), ("lark", "eval_policies.py"), ("48_ibex", "eval_policies.py")]
-    assert rows[0]["runs"] == 2 and rows[0]["mean_turns"] == 12.0 and rows[0]["each_run"] == "13.0 11.0"
-    assert rows[2]["full_60s_runs"] == 0 and rows[2]["std_turns"] is None
-    assert list(rows[0])[:11] == ["model", "description", "runs", "mean_turns", "std_turns", "best_turns",
-                                  "worst_turns", "full_60s_runs", "mean_duration_s", "each_run", "training_url"]
+    assert [r["model"] for r in rows] == ["48_ibex", "lark"]
+    assert rows[0]["runs"] == 3 and rows[0]["mean_turns"] == 10.0 and rows[0]["each_run"] == "13.0 11.0 6.0"
+    assert rows[0]["full_60s_runs"] == 2 and rows[1]["std_turns"] is None
+    assert list(rows[0]) == ["model", "description", "runs", "mean_turns", "std_turns", "best_turns", "worst_turns",
+                             "full_60s_runs", "mean_duration_s", "each_run", "training_url"]
+
+
+def test_goal_speed_from_wandb(tmp_path):
+    for name in ("ibex", "lark"):
+        (tmp_path / f"{name}_policy.pt").write_bytes(name.encode())
+    known = wr.known_models([record("48_ibex", "ibex", goal=1.5, own=1.5)])
+    assert wr.goal_speed(known, tmp_path / "ibex_policy.pt") == (1.5, "goal speed of 48_ibex on W&B")
+    assert wr.goal_speed(known, tmp_path / "lark_policy.pt")[0] == wr.DEFAULT_SPEED
+    assert wr.goal_speed(known, tmp_path / "ibex_policy.pt", speed=-2.5) == (-2.5, "--speed")
 
 
 def test_curves_over_policy_time(tmp_path):
@@ -294,7 +304,11 @@ def test_curves_over_policy_time(tmp_path):
 def test_auto_arguments():
     import eval_policies as ep
     args = ep.parse_args(["--auto", "--dry-run"])
-    assert args.wandb and args.policies == [] and args.models_dir == ROOT / "models"
+    assert args.wandb and args.policies == [] and args.models_dir == ROOT / "models_proprio"
+    args = ep.parse_args([])  # no policy files: the untested models
+    assert args.auto and args.wandb
+    args = ep.parse_args(["--models-dir", str(ROOT / "models"), "crow", "crow_policy.pt"])
+    assert args.policies == [ROOT / "models/crow_policy.pt"] * 2 and not args.auto
     with pytest.raises(SystemExit):
         ep.parse_args(["--auto", str(ROOT / "models/crow_policy.pt")])
     with pytest.raises(SystemExit):

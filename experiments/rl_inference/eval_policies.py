@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Evaluate cube-spin policies on the real ORCA v2 hand, with the camera counting the cube's turns.
 
+    python experiments/rl_inference/eval_policies.py                    # the models in models_proprio/ not yet on
+                                                                        # W&B; Enter evaluates and uploads them
+    python experiments/rl_inference/eval_policies.py walrus             # one model: models_proprio/walrus_policy.pt
     python experiments/rl_inference/eval_policies.py models/ibex_policy.pt models/crow_policy.pt
     python experiments/rl_inference/eval_policies.py --pose-only       # only move to the start pose
     python experiments/rl_inference/eval_policies.py --camera-only     # only the camera view, the hand is not used
     python experiments/rl_inference/eval_policies.py --mock models/policy.pt   # no hardware: drawn cube, fake hand
     python experiments/rl_inference/eval_policies.py --wandb models/ibex_policy.pt   # and upload the run to W&B
-    python experiments/rl_inference/eval_policies.py --auto --dry-run   # the models in models/ not yet on W&B
-    python experiments/rl_inference/eval_policies.py --auto             # ... evaluate and upload them
+    python experiments/rl_inference/eval_policies.py --dry-run          # only the list of untested models
     python experiments/rl_inference/eval_policies.py --upload logs/real_eval/<run folder>   # upload a saved run
 
 The script starts the hand controller (ROS) and a camera process, then for each policy (TorchScript files of the
@@ -16,7 +18,8 @@ proprioceptive task, 74 observations):
 1. moves the hand to the start pose (the neutral pose with the wrist flexed) and switches the torque off,
 2. waits until the cube lies still in the palm and the motors are cool enough to finish the run below --temp-limit
    (cube_eval/thermal.py), then counts down and starts,
-3. runs the policy for --duration seconds of policy time at --speed. The clock stops while the run is paused:
+3. runs the policy for --duration seconds of policy time at the model's goal speed (its goal on W&B, else 2 rad/s;
+   --speed sets one for all). The clock stops while the run is paused:
    - the cube fell (or is not seen for --lost-timeout seconds): the hand moves to the start pose; the run continues
      when the cube lies still in the palm again (or when you press the space bar),
    - a motor reached --temp-limit: the torque is switched off where the hand is; the run continues when the motors
@@ -33,6 +36,9 @@ temperatures.csv and health.csv (per motor, once per second), joint_tracking.csv
 
 With --wandb (or --auto), every finished run also goes to W&B, rwr-skin/real_hand_eval, in the format of the other
 real-hand evaluation (cube_eval/wandb_results.py), in a background process while the next policy starts.
+
+Without policy files (= --auto) the script lists the models in --models-dir (default models_proprio/, filled by
+download_policies.py) that have no run on W&B yet, and evaluates and uploads them after Enter.
 
 Works on Linux and macOS. The cube detector uses CUDA, Apple's GPU or the CPU, whichever is there.
 """
@@ -476,23 +482,23 @@ class Evaluation:
             self.status["want_cube"] = False
 
     # -- one policy
-    def evaluate(self, policy_path):
+    def evaluate(self, policy_path, speed):
         from cube_spin_policy import CubeSpinPolicy
         a = self.args
         name = policy_path.stem.removesuffix("_policy")
-        policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=a.speed)
+        policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed)
         run_dir = self.out / f"{datetime.now():%Y%m%d_%H%M%S}_{name}"
         run_dir.mkdir(parents=True)
         run = Run(name, policy_path, run_dir, a, self.joint_ids)
-        self.status.update(model=f"{name}   goal {a.speed:+.1f} rad/s", duration=a.duration, goal=a.speed, home=None,
+        self.status.update(model=f"{name}   goal {speed:+.1f} rad/s", duration=a.duration, goal=speed, home=None,
                            trail_id=self.status["trail_id"] + 1, record=None, record_on=True, running=False)
-        print(f"\n=== {name}: goal {a.speed:+.1f} rad/s, {a.duration:.0f} s")
+        print(f"\n=== {name}: goal {speed:+.1f} rad/s, {a.duration:.0f} s")
         hand = self.hand
         try:
             self.park()
             hand.reset_health()
             home = self.wait_ready(a.duration)
-            run.begin(home, hand.temperatures(), a.speed)
+            run.begin(home, hand.temperatures(), speed)
             self.run = run
             self.status.update(home=home.tolist(), record=str(run_dir / "video.mp4"))
             while run.elapsed() < a.duration:
@@ -611,6 +617,9 @@ class Evaluation:
         rates = self.thermal.learn(run.segments) if run.outcome in ("completed", "too many drops") else None
         row = run.write(self.hand, end_temps, rates, self.camera_info, tilt, moved)
         append_row(self.out / "results.csv", row)
+        if row["drops"]:
+            print(f"  before the first drop: {row['turns_before_first_drop']:+.2f} turns in "
+                  f"{row['duration_before_first_drop_s']} s (the result on W&B)")
         print(f"  {row['outcome'].upper()}: {row['turns']:+.2f} turns in {row['active_s']} s "
               f"({row['mean_speed_rad_s']:+.2f} rad/s, goal {row['goal_rad_s']:+.1f}), {row['drops']} drops, "
               f"tracked {row['tracked_fraction']:.0%}, motors {row['temp_max_start_c']:.0f} -> {row['temp_max_end_c']:.0f} C")
@@ -681,6 +690,7 @@ class Run:
         self.t0 = time.time()
         self.home = np.asarray(home, dtype=float)
         self.start_temps = temps
+        self.speed = speed
         self.sign = 1.0 if speed >= 0 else -1.0
         self.counter = TurnCounter()
         self.drop = DropMonitor(self.home, self.args.drop_dist, self.args.drop_confirm, self.args.lost_timeout)
@@ -795,19 +805,21 @@ class Run:
             w = csv.writer(f)
             w.writerow(["policy_time_s", "turns"])
             w.writerows([[round(t, 3), round(c, 4)] for t, c in curve])
-        progress = progress_metrics([t for t, _ in curve], [c for _, c in curve], active)
-        before_drop = (self.sign * counter.angle_at(self.drop_times[0]) / (2 * np.pi) if self.drop_times
-                       else self.sign * counter.turns)
+        # the other evaluation ends a run at the first drop: these figures are up to there
+        until = self.drop_times[0] if self.drop_times else active
+        before_drop = self.sign * counter.angle_at(until) / (2 * np.pi) if self.drop_times else self.sign * counter.turns
+        progress = progress_metrics([t for t, _ in curve if t <= until], [c for t, c in curve if t <= until], until)
 
         errors = "; ".join(f"{j}: {'+'.join(status_names(b))}" for j, b in zip(joints, status) if b)
         row = dict(
             time=datetime.fromtimestamp(self.t0).strftime("%Y-%m-%d %H:%M:%S"), model=self.name,
             policy_file=str(self.policy_path), policy_sha256=sha256(self.policy_path)[:12], git_commit=git_commit(),
-            goal_rad_s=a.speed, outcome=self.outcome, active_s=round(active, 1),
+            goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
             wall_s=round(time.time() - self.t0, 1),
             turns=round(self.sign * counter.turns, 2),
             mean_speed_rad_s=round(self.sign * counter.angle / active, 3) if active > 0 else 0.0,
-            **progress, turns_before_first_drop=round(before_drop, 2),
+            turns_before_first_drop=round(before_drop, 2), duration_before_first_drop_s=round(until, 1),
+            speed_before_first_drop_rad_s=round(before_drop * 2 * np.pi / until, 3) if until > 0 else 0.0, **progress,
             drops=self.drops, first_drop_s=self.drop_times[0] if self.drop_times else "",
             pause_drop_s=round(self.pause_drop_s, 1), heat_pauses=self.heat_pauses,
             pause_heat_s=round(self.pause_heat_s, 1),
@@ -880,10 +892,12 @@ def append_row(path, row):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("policies", nargs="*", type=Path, help="Exported policy files (.pt), run in this order. The model "
-                   "name is the file name without .pt and _policy.")
-    p.add_argument("--speed", type=float, default=2.0, help="Commanded spin speed for every policy (rad/s; the sign "
-                   "is the direction).")
+    p.add_argument("policies", nargs="*", type=Path, help="Exported policy files (.pt) or model names in --models-dir "
+                   "(walrus = models_proprio/walrus_policy.pt), run in this order. The model name is the file name "
+                   "without .pt and _policy. None: the untested models, as --auto.")
+    p.add_argument("--speed", type=float, help="Commanded spin speed for every policy (rad/s; the sign is the "
+                   "direction). Default: each model's goal speed on W&B (the speed of its runs there, e.g. 1.5 for "
+                   f"ibex), else {wandb_results.DEFAULT_SPEED}. A run counts in the leaderboard only at that speed.")
     p.add_argument("--duration", type=float, default=60.0, help="Seconds of policy time per run.")
     p.add_argument("--out", default=str(REPO / "logs/real_eval"), help="Results folder.")
     p.add_argument("--note", default="", help="Free text saved with every run (cube, setup, what changed).")
@@ -912,11 +926,12 @@ def parse_args(argv=None):
     p.add_argument("--camera-only", action="store_true", help="Only show the camera view; the hand is not started.")
     p.add_argument("--wandb", action="store_true", help="Upload every finished run to W&B (rwr-skin/real_hand_eval, "
                    "the format of the other real-hand evaluation) in the background. Needs `wandb login`.")
-    p.add_argument("--auto", action="store_true", help="Instead of policy files: list the models in --models-dir "
-                   "(*_policy.pt) that have no run on W&B yet (no run of the same file or the same model name), then "
-                   "evaluate them in alphabetical order. Implies --wandb.")
+    p.add_argument("--auto", action="store_true", help="Instead of policy files (the default without them): list the "
+                   "models in --models-dir (*_policy.pt) that have no run on W&B yet (no run of the same file or the "
+                   "same model name), then after Enter evaluate them in alphabetical order. Implies --wandb.")
     p.add_argument("--dry-run", action="store_true", help="With --auto: only list, start nothing.")
-    p.add_argument("--models-dir", type=Path, default=REPO / "models", help="Where --auto looks for models.")
+    p.add_argument("--models-dir", type=Path, default=REPO / "models_proprio", help="Where --auto and model names look "
+                   "for models (download_policies.py fills it from W&B).")
     p.add_argument("--upload", nargs="+", type=Path, metavar="RUN_DIR", help="Only upload these saved run folders to "
                    "W&B (e.g. after a failed upload); runs already there are skipped.")
     p.add_argument("--wandb-video", action="store_true", help="Also upload video.mp4 (about 25 MB per run).")
@@ -928,11 +943,11 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     if args.auto and args.policies:
         p.error("give policy files or --auto, not both")
+    args.auto = args.auto or not (args.policies or args.pose_only or args.camera_only or args.upload)
     if args.dry_run and not args.auto:
         p.error("--dry-run goes with --auto")
-    if not (args.policies or args.pose_only or args.camera_only or args.auto or args.upload):
-        p.error("give at least one policy file (or --auto, --upload, --pose-only, --camera-only)")
     args.wandb = args.wandb or args.auto
+    args.policies = [model_file(f, args.models_dir) for f in args.policies]
     missing = [str(d) for d in args.upload or [] if not (d / "meta.json").is_file()]
     if missing:
         p.error(f"not run folders of this script (no meta.json): {', '.join(missing)}")
@@ -942,24 +957,59 @@ def parse_args(argv=None):
     return args
 
 
+def model_file(path, models_dir):
+    """A policy argument: a file, else a model name or file name in models_dir (walrus, walrus_policy.pt)."""
+    if path.is_file() or len(path.parts) > 1:
+        return path
+    for candidate in (models_dir / path.name, models_dir / f"{path.name}_policy.pt"):
+        if candidate.is_file():
+            return candidate
+    return path
+
+
+def not_deployable(policy_path):
+    """Why the evaluation cannot run a policy file ("" = it can): it feeds the observations of the proprioceptive task
+    and expects a target per joint (cube_spin_policy.py). Teachers and history students on W&B take others."""
+    import torch
+    from cube_spin_policy import NUM_JOINTS, OBS_DIM
+    try:
+        policy = torch.jit.load(str(policy_path), map_location="cpu").eval()
+        with torch.no_grad():
+            out = policy(torch.zeros(1, OBS_DIM))
+    except Exception:
+        return f"does not take the {OBS_DIM} proprioceptive observations"
+    if out.shape[-1] != NUM_JOINTS:
+        return f"outputs {out.shape[-1]} actions, not {NUM_JOINTS}"
+    return ""
+
+
 def _terminate(*_):
     raise KeyboardInterrupt
 
 
-def untested_policies(args):
-    """--auto: the models in --models-dir without a run on W&B, after listing them all."""
+def wandb_records(args):
+    """All runs in the W&B project (as wandb_results.Project.records()); exits if W&B cannot be reached."""
     try:
         project = wandb_results.Project(args.wandb_entity, args.wandb_project)
-        records = project.records()
+        return project.records()
     except Exception as e:  # not installed, not logged in, offline
-        raise SystemExit(f"W&B is not reachable ({type(e).__name__}: {e}).\nInstall it and log in once: "
-                         "pip install wandb && wandb login")
-    todo, done = wandb_results.split_models(args.models_dir, wandb_results.known_models(records))
-    print(f"Models in {args.models_dir} against W&B {project.path} ({len(records)} runs):")
+        raise SystemExit(f"W&B is not reachable ({type(e).__name__}: {e}).\nLog in once with `wandb login` (see "
+                         "the README's installation)" + ("." if args.auto else ", or give --speed to run without W&B."))
+
+
+def untested_policies(args, known):
+    """--auto: the models in --models-dir without a run on W&B, after listing them all."""
+    if not any(Path(args.models_dir).glob("*_policy.pt")):
+        raise SystemExit(f"No models (*_policy.pt) in {args.models_dir}. Download them from W&B first:\n"
+                         "  python experiments/rl_inference/download_policies.py")
+    todo, done = wandb_results.split_models(args.models_dir, known)
+    print(f"Models in {args.models_dir} against W&B {args.wandb_entity}/{args.wandb_project}:")
     for path, why in done:
         print(f"  tested    {path.name:28s} {why}")
+    unusable = {path: why for path in todo if (why := not_deployable(path))}
     for path in todo:
-        print(f"  untested  {path.name}")
+        print(f"  untested  {path.name:28s} {'not evaluated: ' + unusable[path] if path in unusable else ''}".rstrip())
+    todo = [path for path in todo if path not in unusable]
     print(f"{len(todo)} to evaluate" + (f": {', '.join(wandb_results.model_name(t) for t in todo)}" if todo else ""))
     return todo
 
@@ -974,9 +1024,26 @@ def main(argv=None):
             print(f"W&B upload failed: {type(e).__name__}: {e}")
             return 1
         return 0
+    known = {}
+    if args.auto or (args.policies and args.speed is None):
+        known = wandb_results.known_models(wandb_records(args))
     if args.auto:
-        args.policies = untested_policies(args)
-        if args.dry_run or not args.policies:
+        args.policies = untested_policies(args, known)
+    unusable = [f"{p}: {why}" for p in args.policies if (why := not_deployable(p))]
+    if unusable:
+        raise SystemExit("Cannot evaluate:\n  " + "\n  ".join(unusable))
+    speeds = {}
+    for policy in args.policies:
+        speeds[policy], source = wandb_results.goal_speed(known, policy, args.speed)
+        print(f"  {wandb_results.model_name(policy)}: {speeds[policy]:+.1f} rad/s ({source})")
+    if args.dry_run or (args.auto and not args.policies):
+        return 0
+    if args.auto:
+        try:
+            input(f"Enter: evaluate {'it' if len(args.policies) == 1 else f'these {len(args.policies)}'} on the hand "
+                  "and upload the runs (Ctrl+C: cancel) ")
+        except (EOFError, KeyboardInterrupt):
+            print("\nCancelled.")
             return 0
     Path(args.out).mkdir(parents=True, exist_ok=True)
     signal.signal(signal.SIGTERM, _terminate)
@@ -999,7 +1066,7 @@ def main(argv=None):
                   "torque off.")
             return 0
         for policy in args.policies:
-            ev.evaluate(policy)
+            ev.evaluate(policy, speeds[policy])
         print(f"\nDone. Results: {Path(args.out) / 'results.csv'}")
     except (Quit, Skip):
         print("\nStopped (q).")

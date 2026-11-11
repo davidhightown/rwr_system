@@ -7,11 +7,17 @@ results of both are in one place:
   it (e.g. "48_ibex"), else the file name without _policy.pt,
 - config: model.*, train.* and sim.* (the training run and its sim evaluation, taken over from an earlier W&B run of
   the same model), eval.* (settings and conditions; eval.evaluator = "eval_policies.py"), code.*,
-- summary: result/*, cube/*, hand/* (the other evaluation's keys where a figure means the same; note that its runs end
-  at the first drop, while here the run continues after a drop: result/turns_before_first_drop is its result/turns),
-- curves over policy time (curve/turns, curve/max_temp_c, curve/total_current_a against time_s),
+- summary: result/*, cube/*, hand/* (the other evaluation's keys where a figure means the same). The other evaluation
+  ends a run at the first drop, while this one continues after a drop; so result/turns, result/duration_s,
+  result/rad_per_s, turns_30s, best_10s_rad_per_s and longest_stall_s are up to the first drop, as there, and the
+  figures of the whole run are result/turns_total, result/duration_total_s and result/rad_per_s_total,
+- curves over the whole run's policy time (curve/turns, curve/max_temp_c, curve/total_current_a against time_s),
 - files: the run folder's CSV files and meta.json; video.mp4 only when asked for (about 25 MB),
-- the run "leaderboard": per model and evaluator, its runs at its own goal speed with a cold start, from all runs on W&B.
+- the run "leaderboard", rebuilt from all runs on W&B as the other evaluation builds it: per model, its runs at its own
+  goal speed with a cold start.
+
+A model's goal speed is the speed of its runs on W&B (eval.own_goal_rad_s; the other evaluation has it from its
+models.json), else DEFAULT_SPEED; the first runs of a new model set it.
 
 A model counts as tested when W&B has a real_hand run of the same policy file (SHA-256) or of the same model name.
 
@@ -40,7 +46,7 @@ import numpy as np
 ENTITY = "rwr-skin"
 PROJECT = "real_hand_eval"
 EVALUATOR = "eval_policies.py"
-OTHER_EVALUATOR = "evaluate_real_policies.py"  # runs without eval.evaluator
+DEFAULT_SPEED = 2.0  # rad/s, for a model without a goal speed on W&B
 REFERENCE_MODEL = "48_ibex"  # as in the other evaluation: run it now and then to see whether the hand changed
 MAX_START_C = 42.5  # cold start: the hottest motor at most this warm when the run starts (as in the other evaluation)
 CURVE_STEP_S = 0.5
@@ -49,9 +55,11 @@ UPLOADED_OUTCOMES = ("completed", "too many drops")  # the others say nothing ab
 
 # results.csv column of eval_policies.py -> summary key
 SUMMARY = {
-    "turns": "result/turns", "mean_speed_rad_s": "result/rad_per_s", "active_s": "result/duration_s",
+    "turns_before_first_drop": "result/turns", "duration_before_first_drop_s": "result/duration_s",
+    "speed_before_first_drop_rad_s": "result/rad_per_s",
+    "turns": "result/turns_total", "mean_speed_rad_s": "result/rad_per_s_total", "active_s": "result/duration_total_s",
     "outcome": "result/outcome", "turns_30s": "result/turns_30s", "best_10s_rad_per_s": "result/best_10s_rad_per_s",
-    "longest_stall_s": "result/longest_stall_s", "turns_before_first_drop": "result/turns_before_first_drop",
+    "longest_stall_s": "result/longest_stall_s",
     "drops": "result/drops", "first_drop_s": "result/first_drop_s", "pause_drop_s": "result/pause_drop_s",
     "wall_s": "result/wall_s",
     "tracked_fraction": "cube/tracked_fraction", "detections_per_s": "cube/poses_per_s",
@@ -134,6 +142,18 @@ def known_models(records):
     return out
 
 
+def goal_speed(known, policy_path, speed=None):
+    """(rad/s, where it comes from) for a policy file: speed if given, else the model's goal speed on W&B, else
+    DEFAULT_SPEED."""
+    if speed is not None:
+        return speed, "--speed"
+    short, k = find_model(known, model_name(policy_path), sha256(policy_path))
+    own = number((k or {}).get("own_goal"))
+    if own is None:
+        return DEFAULT_SPEED, "default: no goal speed on W&B"
+    return own, f"goal speed of {k['name']} on W&B"
+
+
 def find_model(known, name, sha=""):
     """(short name on W&B, its entry) for a model file: the same file, else the same name (any case); (None, None)."""
     if sha:
@@ -187,6 +207,7 @@ def config_of(meta, run_dir, known):
     k = k or {}
     goal = number(meta.get("goal_rad_s"))
     own = number(k.get("own_goal"))
+    own = goal if own is None else own  # a model new to W&B: its first runs set its goal speed
     start = number(meta.get("temp_max_start_c"))
     commit = str(meta.get("git_commit", ""))
     sim = dict(k.get("sim") or {})
@@ -220,6 +241,7 @@ def summary_of(meta):
             x = number(value)
             out[key] = x if x is not None else value
     out["cube/turns_camera_axis"] = out.get("result/turns")  # turns are counted about the camera's viewing axis
+    out["cube/turns_camera_axis_total"] = out.get("result/turns_total")
     out["result/stop_reason"] = STOP_REASONS.get(meta.get("outcome", ""), meta.get("outcome", ""))
     drops = number(meta.get("drops")) or 0
     out["result/dropped"] = drops > 0
@@ -280,8 +302,8 @@ def curves(run_dir, duration):
 
 
 def leaderboard_rows(records):
-    """As the other evaluation's leaderboard, from the runs on W&B, with one row per model and evaluator (the two count
-    differently: there a run ends at the first drop), the best mean first."""
+    """The other evaluation's leaderboard, from all runs on W&B (of both evaluations: result/turns means the same):
+    per model, its runs at its own goal speed with a cold start, the best mean first."""
     groups = {}
     for r in records:
         if r.get("job_type") != "real_hand":
@@ -290,10 +312,9 @@ def leaderboard_rows(records):
         e, m = config.get("eval") or {}, config.get("model") or {}
         if not (e.get("at_own_goal", True) and e.get("cold_start", True)) or number(s.get("result/turns")) is None:
             continue
-        key = (m.get("name") or m.get("short_name") or "?", e.get("evaluator") or OTHER_EVALUATOR)
-        groups.setdefault(key, []).append(r)
+        groups.setdefault(m.get("name") or m.get("short_name") or "?", []).append(r)
     rows = []
-    for (name, evaluator), rs in groups.items():
+    for name, rs in groups.items():
         rs = sorted(rs, key=lambda r: str((r["config"].get("eval") or {}).get("started", "")))
         turns = [number(r["summary"]["result/turns"]) for r in rs]
         first = rs[0]["config"]
@@ -305,7 +326,7 @@ def leaderboard_rows(records):
                          mean_duration_s=round(statistics.mean(number(r["summary"].get("result/duration_s")) or 0.0
                                                                for r in rs), 1),
                          each_run=" ".join(f"{t:.1f}" for t in turns),
-                         training_url=(first.get("train") or {}).get("url", ""), evaluator=evaluator))
+                         training_url=(first.get("train") or {}).get("url", "")))
     return sorted(rows, key=lambda row: -row["mean_turns"])
 
 

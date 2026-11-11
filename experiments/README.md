@@ -44,21 +44,26 @@ python experiments/rl_inference/eval_policies.py --camera-only
 # only move the hand to the start pose and switch the torque off
 python experiments/rl_inference/eval_policies.py --pose-only
 
-# evaluate two policies, 60 s each at 2 rad/s
+# evaluate two policies, 60 s each at their goal speed (from W&B, else 2 rad/s)
 python experiments/rl_inference/eval_policies.py models/ibex_policy.pt models/crow_policy.pt
+
+# ... at one speed for both
+python experiments/rl_inference/eval_policies.py --speed 2.0 models/ibex_policy.pt models/crow_policy.pt
 
 # ... and upload each run to W&B (rwr-skin/real_hand_eval)
 python experiments/rl_inference/eval_policies.py --wandb models/ibex_policy.pt models/crow_policy.pt
 
-# list the models in models/ that have no run on W&B yet, then evaluate and upload them
-python experiments/rl_inference/eval_policies.py --auto --dry-run
-python experiments/rl_inference/eval_policies.py --auto
+# download the new policies from W&B (orca_proprio -> models_proprio/, orca_extero -> models_extero/)
+python experiments/rl_inference/download_policies.py
+# list the models in models_proprio/ that have no run on W&B yet; Enter evaluates and uploads them
+python experiments/rl_inference/eval_policies.py --dry-run
+python experiments/rl_inference/eval_policies.py
 ```
 
 **The hand moves when the script starts**: to its neutral pose, then to the start pose (the neutral pose with the wrist flexed: 2° before the upper end of its range, `--start-wrist-deg` sets another angle). For each policy, the script then:
 
 1. switches the torque off and waits until the cube lies still in the palm and the motors are cool enough (see below), then counts down 3 s,
-2. runs the policy for 60 s (`--duration`) of policy time at 2 rad/s (`--speed`; the sign is the direction). The clock stands still during a pause:
+2. runs the policy for 60 s (`--duration`) of policy time at the model's goal speed: the speed of its runs on W&B (e.g. 1.5 rad/s for ibex), else 2 rad/s; `--speed` sets one for all (the sign is the direction). The clock stands still during a pause:
    - **The cube fell** (more than 6 cm from where it rested, or not seen for 3 s): the hand moves to the start pose and the torque goes off. Put the cube back; the run continues by itself when the cube lies still again. The space bar continues at once. After more than 5 drops (`--max-drops`) the run ends.
    - **A motor reached 60 °C** (`--temp-limit`): the torque goes off where the hand is, without a movement. The run continues when the motors are cool enough for the rest of the time.
 3. moves back to the start pose, switches the torque off and writes the results.
@@ -70,16 +75,16 @@ Keys in the camera window: space = start or continue now, `n` = next policy, `q`
 **The window and the video** show the detected cube, the path of its centre over the last 8 s, where it rested (with the drop radius), the model, the policy time, the turns, the mean speed over the last 5 s, the drops and the motor temperatures. Turns are counted about the camera's viewing axis, positive in the direction of a positive `--speed`. The video leaves out cooling pauses.
 
 **Results** go to `logs/real_eval/` (`--out`):
-- `results.csv`: one row per run with the model, the policy file's hash, the git commit, the turns and mean speed, the turns after 30 s, the fastest 10 s and the longest stall (defined as in the other real-hand evaluation), the turns before the first drop, the drops and pauses, how well the cube was seen (`tracked_fraction`, `rejected_share`, `longest_gap_s`, `gap_s`), how far the cube moved from its resting place, the camera's tilt and whether it moved, the temperatures (mean and hottest, start and end, the fastest heating motor), the joints' delay and error against their commands, the motor currents, the lowest supply voltage and the servo faults.
+- `results.csv`: one row per run with the model, the policy file's hash, the git commit, the goal speed, the turns and mean speed of the whole run, the turns, time and mean speed before the first drop, the turns after 30 s, the fastest 10 s and the longest stall (these three before the first drop, defined as in the other real-hand evaluation), the drops and pauses, how well the cube was seen (`tracked_fraction`, `rejected_share`, `longest_gap_s`, `gap_s`), how far the cube moved from its resting place, the camera's tilt and whether it moved, the temperatures (mean and hottest, start and end, the fastest heating motor), the joints' delay and error against their commands, the motor currents, the lowest supply voltage and the servo faults.
 - one folder per run: `video.mp4`, `trace.csv` (every detection: pixel and position of the cube's centre, orientation), `turns.csv` (the turns at every counted detection over policy time), `joints.csv` (commanded and measured angles and currents, 100 Hz), `joint_tracking.csv` (delay, error and current per joint), `temperatures.csv` and `health.csv` (per motor, once per second, with the policy time), `meta.json`.
 
 **W&B** (`--wandb`, or `--auto`; set up once with `wandb login`, see the [installation](../README.md#installation-linux)): every finished run (`completed` or `too many drops`; not skipped, aborted or failed ones, and never a `--mock` run) goes to [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval) in the format of the other real-hand evaluation (`real_eval/upload_wandb.py` on `feat/real-hand-evaluation`), by `rl_inference/cube_eval/wandb_results.py` in a background process (log: `node_logs/wandb_upload.log`):
 - one W&B run per run, job type `real_hand`, grouped and named by the model: the name W&B already has for it (e.g. `48_ibex`), else the file name without `_policy.pt`,
 - config: `model.*`, `train.*` and `sim.*` (taken over from an earlier W&B run of the same model), `eval.*` (settings and conditions; `eval.evaluator = eval_policies.py`), `code.*`,
-- summary: `result/*`, `cube/*`, `hand/*` (the other evaluation's keys where a figure means the same); curves over policy time (`curve/turns`, `curve/max_temp_c`, `curve/total_current_a`); the run folder's CSV files and `meta.json`; `video.mp4` only with `--wandb-video`,
-- the `leaderboard` run, rebuilt from all runs on W&B: per model and evaluator, the runs at the model's own goal speed with a cold start.
+- summary: `result/*`, `cube/*`, `hand/*` (the other evaluation's keys where a figure means the same). The other evaluation ends a run at the first drop, so `result/turns`, `result/duration_s`, `result/rad_per_s`, `result/turns_30s`, `result/best_10s_rad_per_s` and `result/longest_stall_s` are up to the first drop; the whole run is in `result/turns_total`, `result/duration_total_s` and `result/rad_per_s_total`. Curves over the whole run's policy time (`curve/turns`, `curve/max_temp_c`, `curve/total_current_a`); the run folder's CSV files and `meta.json`; `video.mp4` only with `--wandb-video`,
+- the `leaderboard` run, rebuilt from all runs on W&B of both evaluations, as the other evaluation builds it: per model, the runs at the model's own goal speed with a cold start (hottest motor at most 42.5 °C). A model's goal speed is the speed of its runs on W&B; a new model's first runs set it.
 
-`--auto` evaluates the `*_policy.pt` files in `models/` (`--models-dir`) that W&B has no `real_hand` run of: none of the same file (SHA-256) and none of the same model name. `--dry-run` only prints the list. A run that is skipped (`n`) is not uploaded, so the model stays on the list. `--upload RUN_DIR ...` uploads saved run folders later (runs already on W&B are skipped); `python experiments/rl_inference/cube_eval/wandb_results.py untested models/` prints the list without the evaluation's dependencies.
+Without policy files (or with `--auto`) the script evaluates the `*_policy.pt` files in `models_proprio/` (`--models-dir`) that W&B has no `real_hand` run of: none of the same file (SHA-256) and none of the same model name. It leaves out files that do not take the 74 proprioceptive observations, and waits for Enter before it starts. `--dry-run` only prints the list. A model name as argument (`walrus`) means `models_proprio/walrus_policy.pt`. A run that is skipped (`n`) is not uploaded, so the model stays on the list. `--upload RUN_DIR ...` uploads saved run folders later (runs already on W&B are skipped); `python experiments/rl_inference/cube_eval/wandb_results.py untested models/` prints the list without the evaluation's dependencies.
 
 A warning sign in a row: `tracked_fraction` well below 1, a `rejected_share` above about 0.1, or `gap_s` (the time in stretches of more than 0.6 s without a usable detection) above a few seconds. The turns are then less certain. On a Mac the detector reaches about 5 poses per second, which is enough up to about 3 rad/s; with an NVIDIA GPU it is faster.
 
