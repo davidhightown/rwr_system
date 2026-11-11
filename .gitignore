@@ -5,3 +5,6 @@ __pycache__/
 # cube detector model files, downloaded with experiments/rl_inference/pose_estimation/download_models.sh
 *.ckpt
 *.pth.tar
+# policies, downloaded from W&B with experiments/rl_inference/download_policies.py
+models_proprio/
+models_extero/

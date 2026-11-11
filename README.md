@@ -59,6 +59,12 @@ The Python package is called `faive_system` (e.g. `from faive_system.src.common.
    ```bash
      ./src/rwr_system/experiments/rl_inference/pose_estimation/download_models.sh
    ```
+7. For the real-hand evaluation's results on [W&B](https://wandb.ai) (project `rwr-skin/real_hand_eval`), log in once with your API key from [wandb.ai/authorize](https://wandb.ai/authorize). `wandb` comes with the `[all]` install of step 4:
+   ```bash
+     pixi run wandb login
+   ```
+
+     You need to be a member of the `rwr-skin` team: `pixi run python -c "import wandb; print(wandb.Api().viewer.teams)"` should list it.
 
 Run nodes with `ros2 run <package> <file>` and launch files with `ros2 launch <package> <launch file>`.
 
@@ -82,6 +88,12 @@ The commands to run the system are the same as on Linux; the code selects the pl
 
      If the repository is not in `~/ros_ws/src`, add `--base-paths /path/to/rwr_system` to the build command. In each new terminal, run `micromamba activate rwr_jazzy` and the `source` line again.
 3. For the RL task, download the cube detector's model files (step 6 above).
+4. For the real-hand evaluation's results on W&B, log in once (step 7 above). An environment created before `wandb` was added to `environment-macos.yml` needs it installed first:
+   ```bash
+     micromamba activate rwr_jazzy
+     pip install wandb   # only for an older environment
+     wandb login
+   ```
 
 Differences to Linux:
 
@@ -138,6 +150,19 @@ Make sure that the servo wiring is correct before you connect the power: the ser
 
      With `--no-ramp`, each joint jumps to its first chirp sample at full motor speed, and the previous joint snaps back to neutral, so test it on one joint with a small amplitude first. The recorded sweep is the same, so the fit does not change.
 
+     **The default single-joint chirp** (the recorder's first version) is still `experiments/orca/chirp.py`: one joint (`index_mcp` by default, `--joints` for others), a logarithmic chirp from 0.1 to 5 Hz over 20 s, ±10° about the middle of the joint's range, commands at 20 Hz, the other joints at neutral, a ramp of about 1 s to the first sample and 1 s to settle:
+     ```bash
+       python experiments/orca/chirp.py                        # show the plan without moving
+       python experiments/orca/chirp.py --execute              # record it
+       python experiments/orca/chirp.py --execute --read-hz 20 # as the first version: no reads between commands
+     ```
+
+     It writes `logs/chirp_v2/<UTC time>/chirp_index_mcp_*.csv` (`timestamp`, `commanded_position`, `measured_position`: one row per command, the file the fit reads) and `metadata.json`. Since then it also does the following, none of which changes the sweep:
+     - **Servo ramp:** after start-up it writes `servo_acceleration_raw` from `config.yaml` (150) to every motor and records it. This is the same value `orca_core` 0.5.2 writes by itself, so the motors behave as in the first version.
+     - **Fast reads:** between commands it reads the joint at 100 Hz, as the deployment controller does, into `fast_*.csv` with the motor's velocity and current. `--read-hz 20` turns this off, so the bus carries exactly the first version's traffic.
+     - **Abduction joints** (`*_abd`): the neighbouring fingers spread so they do not touch the swept finger, and the sweep centre may move off the middle of the range. `--abd-gap-deg 0` keeps them at neutral and the centre in the middle, as in the first version.
+     - **Optional extras, off by default:** step tests after the chirp (`--steps-deg`) and `--no-ramp`.
+
      After the run, the script shows a table and `overview.png`, and asks whether the run was good. Answer `n` only if the run itself was disturbed (bumped, loaded, loose cable): a genuine outlier is still a good run, and it is what you want to measure. The answer goes into the folder name, so `ls -d logs/chirp_v2/*_good` lists the good runs. Press Enter to decide later and rename the folder yourself, and do not tag test runs as good. Each folder has the `config.yaml` and `calibration.yaml` of that run, and its name has the start time in UTC. `logs/chirp_v2/` is ignored by git, so copy the runs somewhere safe. See [experiments/orca/README.md](experiments/orca/README.md).
 5. **Fit the joint parameters** on the training computer, in the Python environment with Isaac Lab, from `scripts/motor_param_characterization` in `rwr_faive_lab`. Install the fit's packages once with `python -m pip install scikit-optimize pandas`. The simulator's joint names have the prefix `right_`:
    ```bash
@@ -156,6 +181,36 @@ To check the hand without teleop or a policy, `experiments/fixed_command.py` pub
 ## Reinforcement learning: cube spin
 
 Run a policy trained in faive_lab on the hand, detect the cube, and calibrate the camera: see [experiments/README.md](experiments/README.md).
+
+### Deploy and evaluate policies on the real hand
+
+`experiments/rl_inference/eval_policies.py` runs exported policies one after another on the hand for 60 s each, counts the cube's turns with the camera from above, and uploads the results to W&B. One command starts the hand controller, the camera and a live window; do not start them yourself. Details (start pose, drops, heat pauses, all result columns): [experiments/README.md](experiments/README.md#evaluate-policies-on-the-real-hand).
+
+1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio` or `rwr-skin/orca_extero`. This copies those not yet here to `models_proprio/<name>_policy.pt` and `models_extero/<name>_policy.pt` (with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit). Files already there are left alone. Both folders are git-ignored.
+   ```bash
+     python experiments/rl_inference/download_policies.py             # --dry-run: only list the new ones
+   ```
+   The evaluation below uses `models_proprio/` only.
+2. **Check the setup** (the hand is calibrated, the camera looks down at the palm on a USB 3 port, the W&B login of the installation is done):
+   ```bash
+     python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
+     python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
+   ```
+3. **Evaluate every untested model.** Without arguments the script lists the models in `models_proprio/` with no run on W&B yet (none of the same file and none of the same name), sets aside those it cannot run (teachers and history students, which take other observations than the 74 proprioceptive ones), and after Enter evaluates the rest and uploads each run:
+   ```bash
+     python experiments/rl_inference/eval_policies.py --dry-run   # only the list: tested / untested
+     python experiments/rl_inference/eval_policies.py
+   ```
+
+     To deploy specific models, name them (a name is looked up in `models_proprio/`; a path works too), and add `--wandb` to upload the runs: `python experiments/rl_inference/eval_policies.py --wandb walrus models/ibex_policy.pt`. Without `--wandb` nothing is uploaded for named models.
+4. **Run.** Put the cube in the palm; each run starts by itself when the cube lies still and the motors are cool enough. If the cube falls, put it back: the run goes on. Keys in the window: space = start or continue now, `n` = next policy, `q` = quit. Ctrl+C switches the torque off and stops.
+5. **Results.** Locally in `logs/real_eval/` (`results.csv` and a folder per run with the video). On W&B in [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval), in the same format as the other real-hand evaluation (one run per policy run, grouped by model, and the `leaderboard` run), with `eval.evaluator = eval_policies.py`. The upload runs in the background while the next policy starts. Only finished runs are uploaded (not skipped or aborted ones). Add `--wandb-video` to upload the videos too (about 25 MB each). If an upload failed (e.g. offline), the script prints the command to upload again, e.g. `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/20261111_203512_lark`.
+
+**Comparable with the other real-hand evaluation** (`evaluate_real_policies.py` on `feat/real-hand-evaluation`), whose runs are in the same W&B project and leaderboard:
+- **Drops:** the other evaluation ends a run at the first drop; this one puts the cube back and continues. On W&B, `result/turns`, `result/duration_s`, `result/rad_per_s`, `result/turns_30s`, `result/best_10s_rad_per_s` and `result/longest_stall_s` are therefore counted up to the first drop, as there; the whole run's figures are `result/turns_total`, `result/duration_total_s` and `result/rad_per_s_total`, and `result/drops` counts the drops. `results.csv` has both.
+- **Goal speed:** turns in 60 s depend on the commanded speed, so the leaderboard compares each model at its own goal speed only. Without `--speed`, each model runs at its goal speed on W&B (the speed of its runs there, e.g. 1.5 rad/s for ibex, 1.8 for dolphin); a model new to W&B runs at 2 rad/s, and its first runs set its goal speed. The script prints the speed of every model before it starts. `--speed` sets one speed for all; runs at another speed than the model's goal are on W&B but not in the leaderboard.
+- **Cold start:** the leaderboard also takes only runs that started with the hottest motor at most 42.5 °C.
+- Left as they are: the start pose (wrist 33° here, 30° there), the camera exposure (5 ms here, automatic there), the heat rule (pause at 60 °C here, stop at 58 °C there) and the turn counting.
 
 ## Imitation learning
 

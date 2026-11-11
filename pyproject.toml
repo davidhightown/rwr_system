@@ -61,6 +61,7 @@ all = [
     "mediapipe",
     "scikit-learn",  # retargeter calibration
     "matplotlib",
+    "wandb",  # real-hand evaluation results (experiments/rl_inference/eval_policies.py --wandb / --auto)
 ]
 
 [tool.setuptools]
