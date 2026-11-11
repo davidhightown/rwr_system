@@ -1,9 +1,11 @@
-"""Offline tests (no hardware) of the turn counting, the drop detection, the analysis, the live view, the video, the
-saving of results, the temperature filter and the servo status of the hand controller:
+"""Offline tests (no hardware, no W&B) of the turn counting, the drop detection, the analysis, the live view, the video,
+the saving of results, the temperature filter, the servo status of the hand controller, which runs count and can be
+compared (results_rules.py), and what upload_wandb.py sends:
 
     pixi run python src/rwr_system/experiments/rl_inference/real_eval/test_offline.py [image.png]
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -130,6 +132,7 @@ def main():
         import cv2
         cv2.imwrite(sys.argv[1], frame)
     results += check_recording_and_saving()
+    results += check_results_and_wandb()
     print(f"\n{sum(results)} of {len(results)} checks passed")
     sys.exit(0 if all(results) else 1)
 
@@ -211,6 +214,27 @@ def check_recording_and_saving():
     results.append(check("results files", len(rows) == 2 and rows[0]["new"] == "" and len(saved) == 1
                          and saved[0]["session"] == "eval_x", "both rows in the session, the saved one in all_results"))
 
+    # W&B: a saved run starts the uploader in the background, without this Python's PYTHONPATH; an unsaved one does not
+    started, real_popen, real_path = [], ev.subprocess.Popen, os.environ.get("PYTHONPATH")
+    ev.subprocess.Popen = lambda cmd, **kw: started.append((cmd, kw))
+    os.environ["PYTHONPATH"] = "/opt/ros/somewhere"
+    try:
+        e.wandb_python = "/other/python"
+        e._save(session / "results.csv", dict(model="c", turns=3, valid="yes", run_dir=str(session / "r1")))
+        e._save(session / "results.csv", dict(model="d", turns=4, valid="no", run_dir=str(session / "r2")))
+    finally:
+        ev.subprocess.Popen = real_popen
+        if real_path is None:
+            os.environ.pop("PYTHONPATH")
+        else:
+            os.environ["PYTHONPATH"] = real_path
+    cmd, kw = started[0] if started else ([], {})
+    results.append(check("W&B upload", len(started) == 1 and cmd[:2] == ["/other/python", str(ev.WANDB_UPLOADER)]
+                         and cmd[-4:] == ["--models-dir", str(tmp), "--session", "eval_x"]
+                         and "PYTHONPATH" not in kw["env"] and kw["start_new_session"]
+                         and ev.find_wandb_python("/no/such/python") is None,
+                         "one background upload of the session for the saved run; no Python with wandb: off"))
+
     # servo status: faults of the run and of the parking afterwards, lowest voltage
     e.joint_ids = ["wrist", "index_abd", "pinky_mcp"]
     e.ros = types.SimpleNamespace(lock=threading.Lock(), status_errors=np.array([0, 0x02, 0x20]))
@@ -261,6 +285,61 @@ def check_recording_and_saving():
     results.append(check("logs and empty sessions", ok, "restart appends; only the empty new session removed"))
     return results
 
+
+
+def check_results_and_wandb():
+    """results_rules.py (saved runs, conditions, stable ids) and upload_wandb.py's curves and leaderboard (no W&B)."""
+    import csv
+    import json
+    import shutil
+    import tempfile
+
+    import results_rules as rr
+    import upload_wandb as up
+    results, tmp = [], Path(tempfile.mkdtemp())
+    (tmp / "models.json").write_text(json.dumps([dict(idx=48, name="ibex", goal=1.5, description="d")]))
+    session = tmp / "eval_20261111_100000"
+    rows = [dict(time="2026-11-11 10:00:05", model="48_ibex", goal_ang_vel=1.5, start_temp_max=41, turns=1.59,
+                 duration_s=60, outcome="completed", valid="yes", run_dir=str(session / "48_ibex_100005")),
+            dict(time="2026-11-11 10:05:00", model="48_ibex", goal_ang_vel=2.2, start_temp_max=45, turns=2.0,
+                 duration_s=60, outcome="completed", valid="yes", run_dir=str(session / "48_ibex_100500")),
+            dict(time="2026-11-11 10:10:00", model="48_ibex", goal_ang_vel=1.5, start_temp_max=40, turns=9.0,
+                 duration_s=60, outcome="overheated", valid="no", run_dir=str(session / "48_ibex_101000"))]
+    for r in rows:
+        Path(r["run_dir"]).mkdir(parents=True)
+    with open(session / "results.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    # 100 accepted steps of 0.1 rad about the up axis (camera -z) and one rejected step: 10 rad = 1.59 turns
+    with open(session / "48_ibex_100005" / "trace.csv", "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["time", "x", "y", "z", "qx", "qy", "qz", "qw", "accepted", "step_rx", "step_ry", "step_rz"])
+        for i in range(101):
+            w.writerow([1000.0 + 0.6 * i, 0, 0, 0.3, 0, 0, 0, 1, 1, 0, 0, 0.0 if i == 0 else -0.1])
+        w.writerow([1060.7, 0, 0, 0.3, 0, 0, 0, 1, 0, 0, 0, -0.9])
+
+    runs = rr.saved_runs(tmp)
+    first, other = runs
+    why = "goal 2.2 instead of 1.5 rad/s; started at 45 C"
+    results.append(check("saved runs and conditions", len(runs) == 2 and first.comparable and not other.at_own_goal
+                         and not other.cold_start and other.not_comparable_because == why,
+                         f"{[r.not_comparable_because for r in runs]}"))
+    moved = tmp / "archive" / session.name
+    moved.parent.mkdir()
+    shutil.move(str(session), str(moved))
+    after = rr.saved_runs(tmp)
+    results.append(check("run ids", [r.run_id for r in after] == [r.run_id for r in runs]
+                         and after[0].folder == moved / "48_ibex_100005", "the same after moving the session"))
+    curve = up.curves(after[0].folder, 1.5)
+    results.append(check("turn curve", abs(curve[-1]["curve/turns"] - 10 / (2 * np.pi)) < 1e-3
+                         and abs(curve[-1]["time_s"] - 60.7) < 1e-6
+                         and up.display_name(after[0]) == "48_ibex 2026-11-11 10:00",
+                         f"ends at {curve[-1]['curve/turns']:.3f} turns, {curve[-1]['time_s']:.1f} s"))
+    board = up.leaderboard(after, rr.load_models(tmp))
+    results.append(check("leaderboard", len(board) == 1 and board[0]["runs"] == 1 and board[0]["mean_turns"] == 1.59,
+                         f"{board}"))
+    return results
 
 if __name__ == "__main__":
     main()

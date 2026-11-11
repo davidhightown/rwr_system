@@ -30,7 +30,10 @@ turns_vs_time.png, joints.png, trace.csv (cube poses), joints.csv (commanded and
 100 Hz), joint_tracking.csv (delay, error and current per joint), temperatures.csv, motor_status.csv (supply voltage and
 servo status bits), meta.json (model, file hash, options, git commit, start temperatures, result), policy_log.csv and
 policy_node.log. <out>/code_changes_<time>.diff holds the uncommitted code changes. --out with an earlier folder
-continues it: models with a saved result there are skipped, except the ones named with --models.
+continues it: models with a saved result there are skipped, except the ones named with --models. With --wandb, every
+saved run of the session is also uploaded to W&B (rwr-skin/real_hand_eval) in the background, with
+real_eval/upload_wandb.py and a Python with wandb (--wandb-python or $RWR_WANDB_PYTHON, else this one). Without
+--wandb, nothing is uploaded; real_eval/upload_wandb.py --session <session folder> uploads a session later.
 """
 
 import argparse
@@ -41,6 +44,7 @@ import os
 import select
 import shutil
 import signal
+import subprocess
 import sys
 import termios
 import time
@@ -61,6 +65,7 @@ from real_eval.cube_tracking import DropMonitor, TurnCounter, resting_position  
 from real_eval.live_view import ViewState, VideoRecorder, render  # noqa: E402
 from real_eval.processes import Processes, find_leftovers, stop_pids, wait_or_fail  # noqa: E402
 from real_eval.ros_interface import RosInterface  # noqa: E402
+from real_eval.results_rules import REFERENCE_MODEL  # noqa: E402
 from real_eval.run_info import session_info, update_meta_result, write_meta  # noqa: E402
 
 faulthandler.enable()  # a crash in a C library prints the Python stack of every thread
@@ -69,6 +74,7 @@ WS = Path(__file__).resolve().parents[4]  # ros_ws
 REPO = Path(__file__).resolve().parents[2]  # rwr_system
 HAND_CONFIG = REPO / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml"
 DETECTOR = Path(__file__).resolve().parent / "pose_estimation/finetuned_models/maskrcnn-finetuned_lightning_new_adamw.ckpt"
+WANDB_UPLOADER = Path(__file__).resolve().parent / "real_eval/upload_wandb.py"
 CUBE_EDGE = 0.045  # m, as cube_edge_length of the cube detector
 
 # outcomes that say nothing about the policy: the run is repeated
@@ -96,6 +102,8 @@ class RunInterrupted(KeyboardInterrupt):
 
 
 class Evaluation:
+    wandb_python = None  # with --wandb, a Python with wandb: every saved run is uploaded (upload_wandb.py); None: off
+
     def __init__(self, args, need_hand=True):
         self.args = args
         self.need_hand = need_hand
@@ -594,6 +602,21 @@ class Evaluation:
         append_row(path, result)
         if result.get("valid") == "yes":
             append_row(Path(self.args.models_dir) / "all_results.csv", dict(session=path.parent.name) | result)
+            self._upload_to_wandb(path.parent)
+
+    def _upload_to_wandb(self, out: Path):
+        """Upload this session's saved runs that are not on W&B yet, in the background: the next run does not wait for
+        it, and it finishes after this script exits. The uploader takes a lock, so uploads started close together
+        queue. Sessions run without --wandb are left alone."""
+        if self.wandb_python is None:
+            return
+        (out / "node_logs").mkdir(parents=True, exist_ok=True)
+        with open(out / "node_logs" / "wandb_upload.log", "a") as log:
+            subprocess.Popen([self.wandb_python, str(WANDB_UPLOADER), "--models-dir", str(self.args.models_dir),
+                              "--session", out.name],
+                             stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+                             env=python_env(self.wandb_python))
+        print("  uploading to W&B in the background (node_logs/wandb_upload.log)")
 
     @staticmethod
     def _summary(path):
@@ -680,6 +703,12 @@ def parse_args():
     p.add_argument("--note", default="", help="Free text saved with every run of this session: cube, setup, "
                    "what changed (e.g. \"new 45 mm cube, re-calibrated thumb\").")
     p.add_argument("--out", help="Results folder; default: <models-dir>/eval_<date_time>. An earlier folder continues.")
+    p.add_argument("--wandb", action="store_true", help="Upload the session's saved runs to W&B "
+                   "(rwr-skin/real_hand_eval). Without it nothing is uploaded; real_eval/upload_wandb.py --session "
+                   "uploads a session later.")
+    p.add_argument("--wandb-python", default=os.environ.get("RWR_WANDB_PYTHON", ""),
+                   help="Python with wandb for --wandb (default: $RWR_WANDB_PYTHON, else this Python; e.g. the Isaac "
+                   "Lab env).")
     p.add_argument("--live", action="store_true", help="Only show the turn count while you turn the cube by hand.")
     p.add_argument("--pose-only", action="store_true", help="Only move the hand to the start pose, then exit.")
     p.add_argument("--no-launch", action="store_true", help="Use a camera and hand controller that already run.")
@@ -761,6 +790,11 @@ def main():
     # the hand could then not be parked (no answer from the torque service). The handlers here raise
     # KeyboardInterrupt in the main thread, and shutdown() parks the hand while ROS still runs.
     ev = Evaluation(args, need_hand=not args.live)
+    if args.wandb and not (args.live or args.pose_only):
+        ev.wandb_python = find_wandb_python(args.wandb_python)
+        print("Saved runs go to W&B (rwr-skin/real_hand_eval)." if ev.wandb_python else
+              "No W&B upload: no Python with wandb. Set RWR_WANDB_PYTHON (e.g. the Isaac Lab env's python) or "
+              "--wandb-python.")
     ev.ros.start()
     try:
         ev.launch(out)
@@ -772,6 +806,9 @@ def main():
             print(f"The hand rests in the start pose (wrist {args.start_wrist_deg:+.0f} deg), torque off.")
             return
         print(f"{len(models)} models, results in {out}")
+        if REFERENCE_MODEL not in {f"{m['idx']:02d}_{m['name']}" for m in models}:
+            print(f"Tip: run the reference {REFERENCE_MODEL} at the start and the end of a session (--models "
+                  f"{REFERENCE_MODEL.split('_')[0]} ...): if its turns change, the hand changed, not the policies.")
         ev.evaluate(models, out)
     except KeyboardInterrupt:
         print("\nStopped.")
@@ -782,6 +819,34 @@ def main():
         ev.shutdown()
         rclpy.try_shutdown()
         remove_if_empty(out, new_folder, failed)
+        if ev.wandb_python is None and has_saved_runs(out):
+            print(f"Not on W&B. To upload this session later (a Python with wandb):\n  python {WANDB_UPLOADER} "
+                  f"--models-dir {args.models_dir} --session {out.name}")
+
+
+def has_saved_runs(out: Path) -> bool:
+    results = out / "results.csv"
+    return results.exists() and any(r.get("valid") == "yes" for r in csv.DictReader(open(results)))
+
+
+def python_env(python: str) -> dict:
+    """The environment for another Python: without this one's PYTHONPATH (ROS's packages are for this Python)."""
+    env = os.environ.copy()
+    if os.path.realpath(python) != os.path.realpath(sys.executable):
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+    return env
+
+
+def find_wandb_python(choice: str) -> str | None:
+    """--wandb-python (or $RWR_WANDB_PYTHON) if given, else this Python; None if it cannot import wandb."""
+    python = os.path.expanduser(choice) if choice else sys.executable
+    try:
+        ok = subprocess.run([python, "-c", "import wandb"], capture_output=True, env=python_env(python),
+                            timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    return python if ok else None
 
 
 def remove_if_empty(out: Path, new_folder: bool, failed: bool):
