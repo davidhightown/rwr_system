@@ -59,7 +59,7 @@ class PolicyInferenceNodeV2(Node):
         self.declare_parameter("policy_ckpt_path", "")
         self.declare_parameter("hand_config_path", str(DEFAULT_HAND_CONFIG))
         self.declare_parameter("policy_hz", 20.0)          # the task runs the policy at 20 Hz (decimation 6, dt 1/120)
-        self.declare_parameter("action_alpha", 0.2)        # moving average of the task's action term
+        self.declare_parameter("action_alpha", 0.5)        # moving average of the task's action term
         self.declare_parameter("velocity_obs_scale", 0.2)  # joint_vel observation scale in the task
         self.declare_parameter("goal_ang_vel", 1.0)        # rad/s about z; trained on |w| in [0.9, 1.5] (either sign = direction)
         self.declare_parameter("goal_flip_period_s", 0.0)  # > 0: flip the spin direction every this many seconds

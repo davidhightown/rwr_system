@@ -12,7 +12,8 @@ results of both are in one place:
   result/rad_per_s, turns_30s, best_10s_rad_per_s and longest_stall_s are up to the first drop, as there, and the
   figures of the whole run are result/turns_total, result/duration_total_s and result/rad_per_s_total,
 - curves over the whole run's policy time (curve/turns, curve/max_temp_c, curve/total_current_a against time_s),
-- files: the run folder's CSV files and meta.json; video.mp4 only when asked for (about 25 MB),
+- files: the run folder's CSV files and meta.json; video.mp4 when asked for (about 25 MB; eval_policies.py asks by
+  default), which is also added to a run already on W&B without it,
 - the run "leaderboard", rebuilt from all runs on W&B as the other evaluation builds it: per model, its runs at its own
   goal speed with a cold start.
 
@@ -381,6 +382,23 @@ class Project:
         run.finish()
         return url, dict(id=rid, job_type="real_hand", config=config, summary=summary)
 
+    def add_video(self, run_dir, wandb_dir=None):
+        """video.mp4 of a run folder to its run already on W&B; returns the run's url, or None if the folder has no
+        video or the run has it already."""
+        wandb = self.wandb
+        run_dir = Path(run_dir)
+        if not (run_dir / "video.mp4").exists():
+            return None
+        rid = run_id(json.loads((run_dir / "meta.json").read_text()), run_dir)
+        if any(f.name == "video.mp4" for f in retry(lambda: list(self.api.run(f"{self.path}/{rid}").files()))):
+            return None
+        run = wandb.init(entity=self.entity, project=self.project, id=rid, resume="must", reinit="finish_previous",
+                         dir=str(wandb_dir or run_dir.parent), settings=wandb.Settings(silent=True))
+        run.save(str(run_dir / "video.mp4"), base_path=str(run_dir), policy="now")
+        url = run.url
+        run.finish()
+        return url
+
     def write_leaderboard(self, records, wandb_dir):
         rows = leaderboard_rows(records)
         if not rows:
@@ -411,7 +429,8 @@ def upload_runs(run_dirs, video=False, entity=ENTITY, project=PROJECT):
             continue
         url, record = p.upload(d, video=video, records=records, wandb_dir=d.parent)
         if record is None:
-            print(f"  {d.name}: already on W&B")
+            url = p.add_video(d, wandb_dir=d.parent) if video else None
+            print(f"  {d.name}: already on W&B" + (f", video added: {url}" if url else ""))
             continue
         records.append(record)
         new += 1
@@ -431,7 +450,7 @@ def main(argv=None):
     u.add_argument("models_dir", type=Path)
     up = sub.add_parser("upload", help="Upload run folders of eval_policies.py.")
     up.add_argument("run_dirs", nargs="+", type=Path)
-    up.add_argument("--video", action="store_true", help="Also video.mp4.")
+    up.add_argument("--video", action="store_true", help="Also video.mp4, also to runs already on W&B without it.")
     args = ap.parse_args(argv)
     if args.command == "untested":
         todo, done = split_models(args.models_dir, known_models(Project(args.entity, args.project).records()))

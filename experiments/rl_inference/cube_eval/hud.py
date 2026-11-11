@@ -39,7 +39,7 @@ def status_lines(s):
         hot = int(np.nanargmax(temps))
         names = s.get("joint_names") or []
         name = names[hot] if hot < len(names) else str(hot)
-        limit = s.get("temp_limit", 60.0)
+        limit = s.get("temp_limit", 65.0)
         color = RED if temps[hot] >= limit else ORANGE if temps[hot] >= limit - 8 else GREEN
         lines.append((f"motors mean {np.nanmean(temps):.0f} C    hottest {name} {temps[hot]:.0f} C (limit {limit:.0f})",
                       color))

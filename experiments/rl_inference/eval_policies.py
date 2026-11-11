@@ -17,7 +17,8 @@ proprioceptive task, 74 observations):
 
 1. moves the hand to the start pose (the neutral pose with the wrist flexed) and switches the torque off,
 2. waits until the cube lies still in the palm and the motors are cool enough to finish the run below --temp-limit
-   (cube_eval/thermal.py), then counts down and starts,
+   (cube_eval/thermal.py) and for a cold start (the hottest at most 42.5 deg C, else the run is not in the
+   leaderboard), then counts down and starts,
 3. runs the policy for --duration seconds of policy time at the model's goal speed (its goal on W&B, else 2 rad/s;
    --speed sets one for all). The clock stops while the run is paused:
    - the cube fell (or is not seen for --lost-timeout seconds): the hand moves to the start pose; the run continues
@@ -440,9 +441,10 @@ class Evaluation:
         self.hand.set_torque(False)
 
     # -- waiting for cube and temperature; returns the cube's resting position
-    def wait_ready(self, remaining, home=None, home_radius=None, what="start"):
+    def wait_ready(self, remaining, home=None, home_radius=None, what="start", cold_start=False):
         """Until the motors are cool enough for ``remaining`` seconds and the cube lies still (within home_radius of
-        home, if given), then a countdown. Space skips the wait for the cube. Returns the resting position."""
+        home, if given), then a countdown. Space skips the wait for the cube. Returns the resting position.
+        cold_start: also until the hottest motor is at most wandb_results.MAX_START_C (else not in the leaderboard)."""
         countdown_from, forced = None, False
         self.status["want_cube"] = True
         try:
@@ -454,6 +456,7 @@ class Evaluation:
                 forced = forced or (self.key() == " " and (home is not None or self.pose_age() < 1.0))
                 temps = self.hand.temperatures()
                 cool = temps is not None and self.thermal.ready(temps, remaining)
+                too_warm = cool and cold_start and np.nanmax(temps) > wandb_results.MAX_START_C
                 rest = self.rest.resting(now)
                 if rest is not None and home is not None and home_radius and lateral_offset(rest, home) > home_radius:
                     rest = None
@@ -468,6 +471,12 @@ class Evaluation:
                         self.show("cooling down", "orange",
                                   f"COOLING: {self.joint_ids[worst]} {temps[worst]:.0f} C, {what} below "
                                   f"{self.thermal.start_below(remaining)[worst]:.0f} C", "orange")
+                elif too_warm:
+                    countdown_from = None
+                    hottest = int(np.nanargmax(temps))
+                    self.show("cooling down", "orange",
+                              f"COOLING: {self.joint_ids[hottest]} {temps[hottest]:.0f} C, {what} below "
+                              f"{wandb_results.MAX_START_C:.1f} C (cold start)", "orange")
                 elif rest is None:
                     countdown_from = None
                     self.show("waiting for the cube", "yellow", "Put the cube in the palm  (space = " + what + " now)")
@@ -497,7 +506,7 @@ class Evaluation:
         try:
             self.park()
             hand.reset_health()
-            home = self.wait_ready(a.duration)
+            home = self.wait_ready(a.duration, cold_start=True)
             run.begin(home, hand.temperatures(), speed)
             self.run = run
             self.status.update(home=home.tolist(), record=str(run_dir / "video.mp4"))
@@ -903,7 +912,7 @@ def parse_args(argv=None):
     p.add_argument("--note", default="", help="Free text saved with every run (cube, setup, what changed).")
     p.add_argument("--start-wrist-deg", type=float, help="Wrist angle of the start pose (default: flexed, 2 deg "
                    "before the end of its range in config.yaml).")
-    p.add_argument("--temp-limit", type=float, default=60.0, help="Pause the run when a motor reaches this (deg C).")
+    p.add_argument("--temp-limit", type=float, default=65.0, help="Pause the run when a motor reaches this (deg C).")
     p.add_argument("--temp-margin", type=float, default=2.0, help="Start only if every motor is expected to stay "
                    "this far below the limit.")
     p.add_argument("--drop-dist", type=float, default=0.06, help="Cube this far from where it rested = fallen (m, "
@@ -912,7 +921,7 @@ def parse_args(argv=None):
     p.add_argument("--lost-timeout", type=float, default=3.0, help="Cube not detected for this long = fallen (s).")
     p.add_argument("--home-radius", type=float, default=0.04, help="After a drop the cube must lie this close to "
                    "where it rested before (m); space overrides.")
-    p.add_argument("--max-drops", type=int, default=5, help="End the run after more drops than this.")
+    p.add_argument("--max-drops", type=int, default=2, help="End the run after more drops than this.")
     p.add_argument("--cube-edge", type=float, default=0.045, help="Edge length of the cube (m).")
     p.add_argument("--exposure-us", type=int, default=5000, help="Camera exposure time; 0 = automatic (blurs a "
                    "turning cube).")
@@ -934,7 +943,9 @@ def parse_args(argv=None):
                    "for models (download_policies.py fills it from W&B).")
     p.add_argument("--upload", nargs="+", type=Path, metavar="RUN_DIR", help="Only upload these saved run folders to "
                    "W&B (e.g. after a failed upload); runs already there are skipped.")
-    p.add_argument("--wandb-video", action="store_true", help="Also upload video.mp4 (about 25 MB per run).")
+    p.add_argument("--wandb-video", action=argparse.BooleanOptionalAction, default=True,
+                   help="Also upload video.mp4 (about 25 MB per run); with --upload, also to runs already on W&B "
+                   "without it.")
     p.add_argument("--wandb-entity", default=wandb_results.ENTITY, help=argparse.SUPPRESS)
     p.add_argument("--wandb-project", default=wandb_results.PROJECT, help=argparse.SUPPRESS)
     p.add_argument("--mock", action="store_true", help="No hardware: a drawn cube and a fake hand.")

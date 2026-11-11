@@ -8,3 +8,4 @@ __pycache__/
 # policies, downloaded from W&B with experiments/rl_inference/download_policies.py
 models_proprio/
 models_extero/
+logs/
