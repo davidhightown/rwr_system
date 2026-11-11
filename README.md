@@ -150,6 +150,19 @@ Make sure that the servo wiring is correct before you connect the power: the ser
 
      With `--no-ramp`, each joint jumps to its first chirp sample at full motor speed, and the previous joint snaps back to neutral, so test it on one joint with a small amplitude first. The recorded sweep is the same, so the fit does not change.
 
+     **The default single-joint chirp** (the recorder's first version) is still `experiments/orca/chirp.py`: one joint (`index_mcp` by default, `--joints` for others), a logarithmic chirp from 0.1 to 5 Hz over 20 s, ±10° about the middle of the joint's range, commands at 20 Hz, the other joints at neutral, a ramp of about 1 s to the first sample and 1 s to settle:
+     ```bash
+       python experiments/orca/chirp.py                        # show the plan without moving
+       python experiments/orca/chirp.py --execute              # record it
+       python experiments/orca/chirp.py --execute --read-hz 20 # as the first version: no reads between commands
+     ```
+
+     It writes `logs/chirp_v2/<UTC time>/chirp_index_mcp_*.csv` (`timestamp`, `commanded_position`, `measured_position`: one row per command, the file the fit reads) and `metadata.json`. Since then it also does the following, none of which changes the sweep:
+     - **Servo ramp:** after start-up it writes `servo_acceleration_raw` from `config.yaml` (150) to every motor and records it. This is the same value `orca_core` 0.5.2 writes by itself, so the motors behave as in the first version.
+     - **Fast reads:** between commands it reads the joint at 100 Hz, as the deployment controller does, into `fast_*.csv` with the motor's velocity and current. `--read-hz 20` turns this off, so the bus carries exactly the first version's traffic.
+     - **Abduction joints** (`*_abd`): the neighbouring fingers spread so they do not touch the swept finger, and the sweep centre may move off the middle of the range. `--abd-gap-deg 0` keeps them at neutral and the centre in the middle, as in the first version.
+     - **Optional extras, off by default:** step tests after the chirp (`--steps-deg`) and `--no-ramp`.
+
      After the run, the script shows a table and `overview.png`, and asks whether the run was good. Answer `n` only if the run itself was disturbed (bumped, loaded, loose cable): a genuine outlier is still a good run, and it is what you want to measure. The answer goes into the folder name, so `ls -d logs/chirp_v2/*_good` lists the good runs. Press Enter to decide later and rename the folder yourself, and do not tag test runs as good. Each folder has the `config.yaml` and `calibration.yaml` of that run, and its name has the start time in UTC. `logs/chirp_v2/` is ignored by git, so copy the runs somewhere safe. See [experiments/orca/README.md](experiments/orca/README.md).
 5. **Fit the joint parameters** on the training computer, in the Python environment with Isaac Lab, from `scripts/motor_param_characterization` in `rwr_faive_lab`. Install the fit's packages once with `python -m pip install scikit-optimize pandas`. The simulator's joint names have the prefix `right_`:
    ```bash
