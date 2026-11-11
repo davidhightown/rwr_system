@@ -7,6 +7,9 @@ from orca_core import load_hand
 from faive_system.src.hand_control.orca import servo_profile
 
 
+FEETECH_PRESENT_VOLTAGE = 62  # 0.1 V per unit; register 63 is the temperature in deg C
+
+
 class OrcaHandV2:
     def __init__(self, config_path: str):
         # An explicit config_path skips orca_core's hardware autodetection.
@@ -18,6 +21,7 @@ class OrcaHandV2:
         config = self._hand.config
         self.joint_ids = list(config.joint_ids)
         self.num_motors = len(self.joint_ids)
+        self.last_current_ma = None
         joint_index = {joint: i for i, joint in enumerate(self.joint_ids)}
         # get_motor_state() arrays are in motor_ids order; these map them to joint_ids order.
         self._joint_order = np.empty(self.num_motors, dtype=np.intp)
@@ -44,8 +48,11 @@ class OrcaHandV2:
         self._hand.set_joint_positions(np.asarray(joint_pos_deg, dtype=np.float64))
 
     def read_joint_state(self):
-        """One bus read -> (positions [deg], velocities [deg/s]) in joint_ids order."""
+        """One bus read -> (positions [deg], velocities [deg/s]) in joint_ids order.
+
+        The motor currents of the same read (mA, joint_ids order) are kept in ``last_current_ma``."""
         state = self._hand.get_motor_state()
+        self.last_current_ma = np.asarray(state.current, dtype=np.float64)[self._joint_order]
         joint_pos = self._hand._motor_to_joint_pos(state.position)
         pos = np.array([np.nan if joint_pos[j] is None else joint_pos[j] for j in self.joint_ids])
         ratios = self._hand.calibration.joint_to_motor_ratios_dict  # motor rad per joint deg
@@ -53,6 +60,37 @@ class OrcaHandV2:
         motor_ratios = np.array([ratios[motor_ids[i]] or np.nan for i in self._joint_order])
         vel = self._joint_signs * np.asarray(state.velocity)[self._joint_order] / motor_ratios
         return pos, vel
+
+    def read_health(self):
+        """One bus read -> (temperatures [deg C], supply voltages [V], servo status bytes) in joint_ids order.
+
+        Feetech servos answer all three in one sync read of registers 62-63 (the status byte comes with every
+        reply: 0x01 input voltage, 0x02 angle sensor, 0x04 overheating, 0x08 overcurrent, 0x20 overload). That
+        read uses orca_core's private sync-read helper; if it is missing (another orca_core version or motor
+        family), only the temperatures are read, through the public API, and the other two are None.
+        """
+        client = self._hand.motor_client
+        try:
+            with client._bus_lock:
+                reader = client._sync_read(FEETECH_PRESENT_VOLTAGE, 2)
+                if reader.txRxPacket() != 0:  # COMM_SUCCESS
+                    client._flush_input_buffer()
+                    raise IOError("health sync read failed")
+                temp = np.full(self.num_motors, np.nan)
+                volt = np.full(self.num_motors, np.nan)
+                status = np.zeros(self.num_motors, dtype=np.int32)
+                for joint_idx, motor_idx in enumerate(self._joint_order):
+                    motor_id = self._hand.config.motor_ids[motor_idx]
+                    available, error = reader.isAvailable(motor_id, FEETECH_PRESENT_VOLTAGE, 2)
+                    if not available:
+                        continue
+                    volt[joint_idx] = reader.getData(motor_id, FEETECH_PRESENT_VOLTAGE, 1) * 0.1
+                    temp[joint_idx] = reader.getData(motor_id, FEETECH_PRESENT_VOLTAGE + 1, 1)
+                    status[joint_idx] = int(error)
+            return temp, volt, status
+        except (AttributeError, IOError):
+            temp = np.asarray(self._hand.get_motor_temp(), dtype=np.float64)[self._joint_order]
+            return temp, None, None
 
     def enable_torque(self):
         self._hand.enable_torque()

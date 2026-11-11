@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 import rclpy
+import rclpy.executors
 from rclpy.node import Node
 import numpy as np
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, Int32MultiArray
 from std_srvs.srv import SetBool
 import os
 from ament_index_python.packages import get_package_share_directory
+
+
+HEALTH_EVERY_N_READS = 100  # the state is read at 100 Hz
 
 
 class HandControllerNode(Node):
@@ -17,6 +21,8 @@ class HandControllerNode(Node):
         self.declare_parameter("hand_controller/hand_chirality", "right")
         self.declare_parameter("hand_controller/calibrate", False)
         self.declare_parameter('hand_controller/compliant_test_mode', False)
+        # true: switch the torque off when the node exits (Ctrl+C), so a stopped session does not keep heating the motors
+        self.declare_parameter('hand_controller/torque_off_on_exit', False)
 
         self.hand_name = self.get_parameter("hand_controller/hand_name").value
         self.chirality = self.get_parameter("hand_controller/hand_chirality").value
@@ -44,6 +50,14 @@ class HandControllerNode(Node):
             # publisher for sensor values (in radians)
             self.joint_angle_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/joint_position_from_motor', 10)
             self.joint_velocity_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/joint_velocity_from_motor', 10)
+
+            # motor health, in joint order: currents (mA) with every state read, temperatures (deg C), supply
+            # voltages (V) and servo status bytes once per second
+            self.motor_current_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/motor_current', 10)
+            self.motor_temperature_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/motor_temperature', 10)
+            self.motor_voltage_pub = self.create_publisher(Float32MultiArray, f'/{self.chirality}/hand/motor_voltage', 10)
+            self.motor_status_pub = self.create_publisher(Int32MultiArray, f'/{self.chirality}/hand/motor_status', 10)
+            self._health_countdown = 0
 
             from faive_system.src.hand_control.orca.hand_controller_v2 import OrcaHandV2
             # orca_core requires the file name config.yaml; calibration.yaml is stored next to it
@@ -96,6 +110,20 @@ class HandControllerNode(Node):
         q_deg, qd_deg = self._hc.read_joint_state()
         self.joint_angle_pub.publish(Float32MultiArray(data=np.deg2rad(q_deg).astype(np.float32)))
         self.joint_velocity_pub.publish(Float32MultiArray(data=np.deg2rad(qd_deg).astype(np.float32)))
+        if self._hc.last_current_ma is not None:
+            self.motor_current_pub.publish(Float32MultiArray(data=self._hc.last_current_ma.astype(np.float32)))
+        self._health_countdown -= 1
+        if self._health_countdown <= 0:  # once per second: one more bus read in this cycle
+            self._health_countdown = HEALTH_EVERY_N_READS
+            try:
+                temp, volt, status = self._hc.read_health()
+            except Exception as e:  # a failed health read must never stop the control loop
+                self.get_logger().warn(f"Motor health read failed: {e}", throttle_duration_sec=10.0)
+                return
+            self.motor_temperature_pub.publish(Float32MultiArray(data=np.asarray(temp, dtype=np.float32)))
+            if volt is not None:
+                self.motor_voltage_pub.publish(Float32MultiArray(data=np.asarray(volt, dtype=np.float32)))
+                self.motor_status_pub.publish(Int32MultiArray(data=[int(v) for v in status]))
 
 
     def set_torque_enabled_cb(self, request, response):
@@ -143,9 +171,19 @@ class HandControllerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = HandControllerNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
+        pass
+    finally:
+        if node.get_parameter('hand_controller/torque_off_on_exit').value:
+            try:
+                node._hc.disable_torque()
+            except Exception as e:
+                print(f"Could not switch the torque off: {e}")
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
