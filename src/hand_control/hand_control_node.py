@@ -49,6 +49,9 @@ class HandControllerNode(Node):
             # orca_core requires the file name config.yaml; calibration.yaml is stored next to it
             self._hc = OrcaHandV2(os.path.join(config_dir_path, self.chirality, "config.yaml"))
             self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode)
+            self.get_logger().info(
+                f"Servo acceleration {self._hc.servo_profile['servo_acceleration_raw']} (raw) on every motor; "
+                "the sim's ORCA_V2_SERVO_ACCEL must come from chirps recorded with the same value")
             self._orca_timer = self.create_timer(
                 0.01, # seconds
                 self.orca_v2_control_cb,  # callback
