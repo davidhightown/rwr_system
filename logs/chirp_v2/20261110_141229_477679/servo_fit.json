@@ -1,0 +1,280 @@
+{
+  "run": "20261110_141229_477679",
+  "max_chirp_hz": 2.5,
+  "joints": {
+    "wrist": {
+      "clipped": false,
+      "dead_time_ms": 69.0,
+      "accel_rad_s2": 12.43957491870393,
+      "rms_deg": 0.435423105088584,
+      "rms_deg_full_band": 0.7316490824410042,
+      "with_lag": {
+        "dead_time_ms": 12.0,
+        "accel_rad_s2": 12.43957491870393,
+        "lag_ms": 61.5,
+        "rms_deg": 0.1947685765906629,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            71.50000000000001,
+            76.0
+          ],
+          "accel_rad_s2": [
+            12.43957491870393,
+            12.43957491870393
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 77.0,
+        "lag_ms": 91.0,
+        "rms_deg": 2.133049801813987
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_wrist_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "thumb_cmc": {
+      "clipped": false,
+      "dead_time_ms": 43.0,
+      "accel_rad_s2": 34.66886222350243,
+      "rms_deg": 0.30068488559785966,
+      "rms_deg_full_band": 1.0871890225750456,
+      "with_lag": {
+        "dead_time_ms": 41.99999999999999,
+        "accel_rad_s2": 34.919136828141355,
+        "lag_ms": 1.0,
+        "rms_deg": 0.3005482563241353,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            38.5,
+            54.0
+          ],
+          "accel_rad_s2": [
+            31.72622505763139,
+            61.70208267891583
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 45.0,
+        "lag_ms": 33.0,
+        "rms_deg": 0.3415448233868572
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_thumb_cmc_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "thumb_abd": {
+      "clipped": false,
+      "dead_time_ms": 53.00000000000001,
+      "accel_rad_s2": 31.233908240835007,
+      "rms_deg": 0.8979694660618509,
+      "rms_deg_full_band": 2.1445449241266186,
+      "with_lag": {
+        "dead_time_ms": 45.0,
+        "accel_rad_s2": 105.06856719330366,
+        "lag_ms": 27.5,
+        "rms_deg": 0.8581157022150648,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            44.0,
+            84.99999999999999
+          ],
+          "accel_rad_s2": [
+            27.36670614959539,
+            127.2
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 71.00000000000001,
+        "lag_ms": 27.0,
+        "rms_deg": 0.834137995371219
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_thumb_abd_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "thumb_mcp": {
+      "clipped": false,
+      "dead_time_ms": 47.0,
+      "accel_rad_s2": 25.162847624730013,
+      "rms_deg": 0.44847779507268654,
+      "rms_deg_full_band": 1.5892243764690348,
+      "with_lag": {
+        "dead_time_ms": 47.0,
+        "accel_rad_s2": 25.162847624730013,
+        "lag_ms": 0.0,
+        "rms_deg": 0.44847779507268654,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            40.50000000000001,
+            56.00000000000001
+          ],
+          "accel_rad_s2": [
+            24.14616691261971,
+            26.687868692895467
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 77.0,
+        "lag_ms": 25.0,
+        "rms_deg": 0.8329359466402326
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_thumb_mcp_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "thumb_dip": {
+      "clipped": false,
+      "dead_time_ms": 43.0,
+      "accel_rad_s2": 30.139913804749817,
+      "rms_deg": 0.3171575889741807,
+      "rms_deg_full_band": 1.6591747470514504,
+      "with_lag": {
+        "dead_time_ms": 43.0,
+        "accel_rad_s2": 30.184920379161678,
+        "lag_ms": 0.0,
+        "rms_deg": 0.3171524539383871,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            38.5,
+            49.5
+          ],
+          "accel_rad_s2": [
+            27.99265361206911,
+            34.15988001133356
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 77.0,
+        "lag_ms": 13.999999999999998,
+        "rms_deg": 0.43268157291446624
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_thumb_dip_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "index_abd": {
+      "clipped": false,
+      "dead_time_ms": 47.25,
+      "accel_rad_s2": 29.52442503863177,
+      "rms_deg": 0.4643752732998162,
+      "rms_deg_full_band": 1.6080443025344884,
+      "with_lag": {
+        "dead_time_ms": 33.0,
+        "accel_rad_s2": 31.40261756204355,
+        "lag_ms": 19.000000000000004,
+        "rms_deg": 0.46320346347289837,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            41.99999999999999,
+            72.00000000000001
+          ],
+          "accel_rad_s2": [
+            27.36670614959539,
+            120.0
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 77.0,
+        "lag_ms": 19.000000000000004,
+        "rms_deg": 0.5079030210313654
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_index_abd_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "index_mcp": {
+      "clipped": false,
+      "dead_time_ms": 39.0,
+      "accel_rad_s2": 23.606231252468337,
+      "rms_deg": 0.18771916098501462,
+      "rms_deg_full_band": 1.2183687366061178,
+      "with_lag": {
+        "dead_time_ms": 17.0,
+        "accel_rad_s2": 23.724262408730677,
+        "lag_ms": 24.5,
+        "rms_deg": 0.18170081944234487,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            36.75000000000001,
+            43.50000000000001
+          ],
+          "accel_rad_s2": [
+            23.36544769369316,
+            24.199927968467918
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 97.0,
+        "lag_ms": 3.0,
+        "rms_deg": 1.017787104424318
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_index_mcp_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    },
+    "index_pip": {
+      "clipped": false,
+      "dead_time_ms": 49.0,
+      "accel_rad_s2": 29.52442503863177,
+      "rms_deg": 0.5220466160661281,
+      "rms_deg_full_band": 2.475797208247732,
+      "with_lag": {
+        "dead_time_ms": 33.0,
+        "accel_rad_s2": 31.567593932343232,
+        "lag_ms": 20.500000000000004,
+        "rms_deg": 0.5157351868384272,
+        "within_10pct": {
+          "dead_time_plus_lag_ms": [
+            42.0,
+            76.00000000000001
+          ],
+          "accel_rad_s2": [
+            27.36670614959539,
+            120.0
+          ]
+        }
+      },
+      "linear": {
+        "dead_time_ms": 77.0,
+        "lag_ms": 20.000000000000004,
+        "rms_deg": 0.5415556741133448
+      },
+      "accel_predicted_rad_s2": null,
+      "files": [
+        "chirp_index_pip_20261110_141229_477679_ctrl20Hz_20.0s_0.1-5.0Hz_10deg.csv"
+      ]
+    }
+  },
+  "sim": {
+    "ORCA_V2_SERVO_ACCEL": {
+      "^right_(index|middle|ring|pinky)_abd$": 29.5,
+      "^right_(index|middle|ring|pinky)_mcp$": 23.6,
+      "^right_(index|middle|ring|pinky)_pip$": 29.5,
+      "right_thumb_cmc": 34.7,
+      "right_thumb_abd": 31.2,
+      "right_thumb_mcp": 25.2,
+      "right_thumb_dip": 30.1,
+      "right_wrist": 12.4
+    },
+    "dead_time_plus_lag_ms": {
+      "fingers_thumb": 47.0,
+      "wrist": 73.5
+    },
+    "note": "Actuator only, from the command write to the motor encoder. In the sim, delay_substeps / 120 s + D/K should equal it (e.g. D/K = 20 ms and the rest as delay). The deployment pipeline (ROS, policy compute, observation age, about 2 substeps) comes on top for the training delay range."
+  },
+  "flagged": []
+}
