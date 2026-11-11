@@ -46,6 +46,13 @@ python experiments/rl_inference/eval_policies.py --pose-only
 
 # evaluate two policies, 60 s each at 2 rad/s
 python experiments/rl_inference/eval_policies.py models/ibex_policy.pt models/crow_policy.pt
+
+# ... and upload each run to W&B (rwr-skin/real_hand_eval)
+python experiments/rl_inference/eval_policies.py --wandb models/ibex_policy.pt models/crow_policy.pt
+
+# list the models in models/ that have no run on W&B yet, then evaluate and upload them
+python experiments/rl_inference/eval_policies.py --auto --dry-run
+python experiments/rl_inference/eval_policies.py --auto
 ```
 
 **The hand moves when the script starts**: to its neutral pose, then to the start pose (the neutral pose with the wrist flexed: 2° before the upper end of its range, `--start-wrist-deg` sets another angle). For each policy, the script then:
@@ -63,12 +70,20 @@ Keys in the camera window: space = start or continue now, `n` = next policy, `q`
 **The window and the video** show the detected cube, the path of its centre over the last 8 s, where it rested (with the drop radius), the model, the policy time, the turns, the mean speed over the last 5 s, the drops and the motor temperatures. Turns are counted about the camera's viewing axis, positive in the direction of a positive `--speed`. The video leaves out cooling pauses.
 
 **Results** go to `logs/real_eval/` (`--out`):
-- `results.csv`: one row per run with the model, the policy file's hash, the git commit, the turns and mean speed, the drops and pauses, how well the cube was seen (`tracked_fraction`, `rejected_share`, `longest_gap_s`, `gap_s`), how far the cube moved from its resting place, the camera's tilt and whether it moved, the temperatures (mean and hottest, start and end, the fastest heating motor), the joints' delay and error against their commands, the motor currents, the lowest supply voltage and the servo faults.
-- one folder per run: `video.mp4`, `trace.csv` (every detection: pixel and position of the cube's centre, orientation), `joints.csv` (commanded and measured angles and currents, 100 Hz), `joint_tracking.csv` (delay, error and current per joint), `temperatures.csv` and `health.csv` (per motor, once per second), `meta.json`.
+- `results.csv`: one row per run with the model, the policy file's hash, the git commit, the turns and mean speed, the turns after 30 s, the fastest 10 s and the longest stall (defined as in the other real-hand evaluation), the turns before the first drop, the drops and pauses, how well the cube was seen (`tracked_fraction`, `rejected_share`, `longest_gap_s`, `gap_s`), how far the cube moved from its resting place, the camera's tilt and whether it moved, the temperatures (mean and hottest, start and end, the fastest heating motor), the joints' delay and error against their commands, the motor currents, the lowest supply voltage and the servo faults.
+- one folder per run: `video.mp4`, `trace.csv` (every detection: pixel and position of the cube's centre, orientation), `turns.csv` (the turns at every counted detection over policy time), `joints.csv` (commanded and measured angles and currents, 100 Hz), `joint_tracking.csv` (delay, error and current per joint), `temperatures.csv` and `health.csv` (per motor, once per second, with the policy time), `meta.json`.
+
+**W&B** (`--wandb`, or `--auto`; set up once with `wandb login`, see the [installation](../README.md#installation-linux)): every finished run (`completed` or `too many drops`; not skipped, aborted or failed ones, and never a `--mock` run) goes to [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval) in the format of the other real-hand evaluation (`real_eval/upload_wandb.py` on `feat/real-hand-evaluation`), by `rl_inference/cube_eval/wandb_results.py` in a background process (log: `node_logs/wandb_upload.log`):
+- one W&B run per run, job type `real_hand`, grouped and named by the model: the name W&B already has for it (e.g. `48_ibex`), else the file name without `_policy.pt`,
+- config: `model.*`, `train.*` and `sim.*` (taken over from an earlier W&B run of the same model), `eval.*` (settings and conditions; `eval.evaluator = eval_policies.py`), `code.*`,
+- summary: `result/*`, `cube/*`, `hand/*` (the other evaluation's keys where a figure means the same); curves over policy time (`curve/turns`, `curve/max_temp_c`, `curve/total_current_a`); the run folder's CSV files and `meta.json`; `video.mp4` only with `--wandb-video`,
+- the `leaderboard` run, rebuilt from all runs on W&B: per model and evaluator, the runs at the model's own goal speed with a cold start.
+
+`--auto` evaluates the `*_policy.pt` files in `models/` (`--models-dir`) that W&B has no `real_hand` run of: none of the same file (SHA-256) and none of the same model name. `--dry-run` only prints the list. A run that is skipped (`n`) is not uploaded, so the model stays on the list. `--upload RUN_DIR ...` uploads saved run folders later (runs already on W&B are skipped); `python experiments/rl_inference/cube_eval/wandb_results.py untested models/` prints the list without the evaluation's dependencies.
 
 A warning sign in a row: `tracked_fraction` well below 1, a `rejected_share` above about 0.1, or `gap_s` (the time in stretches of more than 0.6 s without a usable detection) above a few seconds. The turns are then less certain. On a Mac the detector reaches about 5 poses per second, which is enough up to about 3 rad/s; with an NVIDIA GPU it is faster.
 
-`--mock` runs the whole flow without hardware (a drawn cube and a fake hand; `--mock-drop-after 5` makes the cube fall once). `python -m pytest tests/test_cube_eval.py` tests the turn counting, the drop detection and the temperature rule.
+`--mock` runs the whole flow without hardware (a drawn cube and a fake hand; `--mock-drop-after 5` makes the cube fall once). `python -m pytest tests/test_cube_eval.py` tests the turn counting, the drop detection, the temperature rule and what goes to W&B (without W&B).
 
 The hand controller publishes the motors' health in joint order: `/right/hand/motor_current` (mA, with every joint state), and once per second `/right/hand/motor_temperature` (°C), `/right/hand/motor_voltage` (V) and `/right/hand/motor_status` (the servos' status bytes: 0x01 input voltage, 0x02 angle sensor, 0x04 overheating, 0x08 overcurrent, 0x20 overload).
 

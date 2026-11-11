@@ -188,3 +188,114 @@ def test_joint_tracking_finds_delay_and_error():
     summary = tracking_summary(rows)
     assert summary["worst_joint"] == "still" and summary["current_total_mean_a"] == pytest.approx(0.4)
     assert status_names(0x24) == ["overheating", "overload"]
+
+
+# -- W&B (no W&B needed: the records are plain dicts as Project.records() returns them)
+from cube_eval import wandb_results as wr  # noqa: E402
+from cube_eval.metrics import progress_metrics  # noqa: E402
+
+
+def test_progress_metrics_as_the_other_evaluation():
+    t = np.arange(0.0, 60.0, 0.2)
+    turns = np.where(t < 20, t * 0.1, np.where(t < 30, 2.0, 2.0 + (t - 30) * 0.2))  # a 10 s stall at 20-30 s
+    m = progress_metrics(t, turns, 60.0)
+    assert m["turns_30s"] == pytest.approx(2.0)
+    assert m["best_10s_rad_per_s"] == pytest.approx(0.2 * 2 * np.pi, abs=0.02)
+    assert 10.0 <= m["longest_stall_s"] <= 11.5
+    assert progress_metrics([1.0], [0.1], 8.0)["turns_30s"] == ""
+
+
+def record(name, short, sha="", goal=1.5, own=1.5, start=40.0, turns=5.0, evaluator=None, started="2026-11-10 10:00",
+           completed=True, idx=48):
+    e = dict(goal_rad_s=goal, own_goal_rad_s=own, at_own_goal=goal == own, cold_start=start <= 42.5, started=started,
+             start_temp_max_c=start)
+    if evaluator:
+        e["evaluator"] = evaluator
+    return dict(id=f"{name}-{started}", job_type="real_hand",
+                config=dict(model=dict(name=name, short_name=short, idx=idx, description=f"about {short}",
+                                       policy_sha256=sha),
+                            train=dict(run="rwr-skin/x/abc", url="https://x/abc", run_name=short), sim={}, eval=e),
+                summary={"result/turns": turns, "result/duration_s": 60.0, "result/full_60s": completed})
+
+
+def test_which_models_are_tested(tmp_path):
+    for name in ("ibex", "lark", "newt", "copy"):
+        (tmp_path / f"{name}_policy.pt").write_bytes(name.encode())
+    (tmp_path / "policy.pt").write_bytes(b"generic")  # not a named model: --auto leaves it out
+    records = [record("48_ibex", "ibex", sha="other"), record("Newt", "Newt"),
+               record("60_x", "x", sha=wr.sha256(tmp_path / "copy_policy.pt")),
+               dict(id="leaderboard", job_type="leaderboard", config={}, summary={})]
+    known = wr.known_models(records)
+    todo, done = wr.split_models(tmp_path, known)
+    assert [p.name for p in todo] == ["lark_policy.pt"]
+    why = {p.name: w for p, w in done}
+    assert why["ibex_policy.pt"] == "48_ibex has 1 run on W&B"          # by name, although another file
+    assert why["newt_policy.pt"].startswith("Newt")                        # any case
+    assert why["copy_policy.pt"].startswith("same file as 60_x")           # by file, although another name
+
+
+def meta_of(model="ibex", goal=2.0, outcome="completed", drops=0, start=30.0):
+    return dict(model=model, time="2026-11-11 22:15:25", policy_file=f"models/{model}_policy.pt",
+                policy_sha256="abc", policy_sha256_full="abcdef", host="mac", goal_rad_s=goal, outcome=outcome,
+                active_s=60.0, turns=4.2, turns_before_first_drop=1.5, drops=drops, temp_max_start_c=start,
+                heating_max_c_per_min="", servo_errors="", git_commit="1d18a28+changes", hand_config_sha256="h",
+                options=dict(duration="60.0", start_wrist_deg="33.0", temp_limit="60.0"))
+
+
+def test_config_and_summary_in_the_other_evaluations_format(tmp_path):
+    known = wr.known_models([record("48_ibex", "ibex", own=1.5)])
+    run_dir = tmp_path / "real_eval" / "20261111_221525_ibex"
+    c = wr.config_of(meta_of(goal=2.0), run_dir, known)
+    assert c["model"]["name"] == "48_ibex" and c["model"]["idx"] == 48 and c["model"]["short_name"] == "ibex"
+    assert c["train"]["run"] == "rwr-skin/x/abc"
+    assert c["eval"]["evaluator"] == "eval_policies.py" and c["eval"]["reference"]
+    assert c["eval"]["at_own_goal"] is False and c["eval"]["cold_start"] is True
+    assert c["eval"]["start_wrist_deg"] == 33.0 and c["eval"]["session"] == "real_eval"
+    assert c["code"] == dict(commit="1d18a28", uncommitted_changes=True, hand_config_sha256="h")
+    new = wr.config_of(meta_of(model="lark"), run_dir, known)
+    assert new["model"]["name"] == "lark" and new["model"]["idx"] is None and new["eval"]["at_own_goal"] is True
+
+    s = wr.summary_of(meta_of(drops=2))
+    assert s["result/turns"] == 4.2 and s["cube/turns_camera_axis"] == 4.2 and s["result/stop_reason"] == "time"
+    assert s["result/dropped"] is True and s["result/full_60s"] is False
+    assert "hand/heating_max_c_per_min" not in s and s["hand/servo_errors"] == ""
+    assert wr.summary_of(meta_of())["result/full_60s"] is True
+    assert wr.run_id(meta_of(), run_dir) == wr.run_id(meta_of(), tmp_path / "moved" / run_dir.name)
+
+
+def test_leaderboard_per_model_and_evaluator():
+    records = [record("48_ibex", "ibex", turns=13.0, started="a"), record("48_ibex", "ibex", turns=11.0, started="b"),
+               record("48_ibex", "ibex", goal=2.2, turns=15.0),                      # not at its own goal
+               record("48_ibex", "ibex", start=50.0, turns=1.0),                     # not a cold start
+               record("48_ibex", "ibex", turns=4.0, evaluator="eval_policies.py", completed=False),
+               record("lark", "lark", own=None, goal=2.0, turns=6.0, evaluator="eval_policies.py")]
+    records[-1]["config"]["eval"]["at_own_goal"] = True
+    rows = wr.leaderboard_rows(records)
+    assert [(r["model"], r["evaluator"]) for r in rows] == [
+        ("48_ibex", "evaluate_real_policies.py"), ("lark", "eval_policies.py"), ("48_ibex", "eval_policies.py")]
+    assert rows[0]["runs"] == 2 and rows[0]["mean_turns"] == 12.0 and rows[0]["each_run"] == "13.0 11.0"
+    assert rows[2]["full_60s_runs"] == 0 and rows[2]["std_turns"] is None
+    assert list(rows[0])[:11] == ["model", "description", "runs", "mean_turns", "std_turns", "best_turns",
+                                  "worst_turns", "full_60s_runs", "mean_duration_s", "each_run", "training_url"]
+
+
+def test_curves_over_policy_time(tmp_path):
+    (tmp_path / "turns.csv").write_text("policy_time_s,turns\n0.5,0.1\n1.2,0.3\n")
+    (tmp_path / "temperatures.csv").write_text("time_s,policy_time_s,state,a,b\n0.5,0.0,running,30,35\n"
+                                               "5.0,0.0,cooling,50,50\n6.0,2.0,running,31,37\n")
+    (tmp_path / "joints.csv").write_text("policy_time_s,current_ma_a,current_ma_b\n0.0,100,-200\n1.0,300,300\n")
+    points = wr.curves(tmp_path, 2.0)
+    assert [p["time_s"] for p in points] == [0.0, 0.5, 1.0, 1.5, 2.0]
+    assert [p["curve/turns"] for p in points] == [0.0, 0.1, 0.1, 0.3, 0.3]
+    assert points[0]["curve/max_temp_c"] == 35.0 and points[-1]["curve/max_temp_c"] == 37.0  # cooling left out
+    assert points[0]["curve/total_current_a"] == pytest.approx(0.3) and "curve/total_current_a" not in points[1]
+
+
+def test_auto_arguments():
+    import eval_policies as ep
+    args = ep.parse_args(["--auto", "--dry-run"])
+    assert args.wandb and args.policies == [] and args.models_dir == ROOT / "models"
+    with pytest.raises(SystemExit):
+        ep.parse_args(["--auto", str(ROOT / "models/crow_policy.pt")])
+    with pytest.raises(SystemExit):
+        ep.parse_args(["--dry-run", str(ROOT / "models/crow_policy.pt")])

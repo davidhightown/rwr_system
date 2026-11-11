@@ -5,6 +5,10 @@
     python experiments/rl_inference/eval_policies.py --pose-only       # only move to the start pose
     python experiments/rl_inference/eval_policies.py --camera-only     # only the camera view, the hand is not used
     python experiments/rl_inference/eval_policies.py --mock models/policy.pt   # no hardware: drawn cube, fake hand
+    python experiments/rl_inference/eval_policies.py --wandb models/ibex_policy.pt   # and upload the run to W&B
+    python experiments/rl_inference/eval_policies.py --auto --dry-run   # the models in models/ not yet on W&B
+    python experiments/rl_inference/eval_policies.py --auto             # ... evaluate and upload them
+    python experiments/rl_inference/eval_policies.py --upload logs/real_eval/<run folder>   # upload a saved run
 
 The script starts the hand controller (ROS) and a camera process, then for each policy (TorchScript files of the
 proprioceptive task, 74 observations):
@@ -25,7 +29,10 @@ everything and leaves the hand with the torque off.
 Results, in --out (default logs/real_eval): results.csv with one row per run, and a folder per run with video.mp4
 (the camera view with the figures drawn in; cooling pauses are left out), trace.csv (every cube detection: pixel and
 position of its centre, orientation), joints.csv (commands, measured angles and currents at 100 Hz),
-temperatures.csv and health.csv (per motor, once per second), joint_tracking.csv and meta.json.
+temperatures.csv and health.csv (per motor, once per second), joint_tracking.csv, turns.csv and meta.json.
+
+With --wandb (or --auto), every finished run also goes to W&B, rwr-skin/real_hand_eval, in the format of the other
+real-hand evaluation (cube_eval/wandb_results.py), in a background process while the next policy starts.
 
 Works on Linux and macOS. The cube detector uses CUDA, Apple's GPU or the CPU, whichever is there.
 """
@@ -38,6 +45,7 @@ import multiprocessing
 import os
 import queue
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -55,13 +63,15 @@ sys.path.insert(0, str(HERE))
 
 from cube_eval import vision  # noqa: E402
 from cube_eval.detector import DEFAULT_CKPT  # noqa: E402
-from cube_eval.metrics import joint_tracking, status_names, tracking_summary  # noqa: E402
+from cube_eval import wandb_results  # noqa: E402
+from cube_eval.metrics import joint_tracking, progress_metrics, status_names, tracking_summary  # noqa: E402
 from cube_eval.thermal import TemperatureFilter, ThermalModel  # noqa: E402
 from cube_eval.turns import DropMonitor, RestDetector, TurnCounter, lateral_offset  # noqa: E402
 
 HAND_CONFIG = REPO / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml"
 HAND_NODE = REPO / "src/hand_control/hand_control_node.py"
 MOCK_HAND_NODE = HERE / "cube_eval/mock_hand_node.py"
+WANDB_RESULTS = HERE / "cube_eval/wandb_results.py"
 POLICY_HZ = 20.0
 COUNTDOWN_S = 3.0
 STALE_JOINTS_S = 2.0
@@ -232,6 +242,7 @@ class Evaluation:
             raise SystemExit(f"--start-wrist-deg {wrist} is outside the wrist's range {low}..{high}")
         self.start_pose = np.array([float(config["neutral_position"][j]) for j in self.joint_ids])
         self.start_pose[self.joint_ids.index("wrist")] = wrist
+        args.start_wrist_deg = wrist  # so that meta.json has the angle that was used
         self.out = Path(args.out)
         self.thermal = ThermalModel(self.joint_ids, args.temp_limit, args.temp_margin, self.out / "thermal_history.json")
 
@@ -248,6 +259,7 @@ class Evaluation:
         self.rest = RestDetector()
         self.gravity = []           # accelerometer directions (unit vectors) during the session
         self.run = None             # the running policy's Run
+        self.uploads = []           # W&B upload processes (--wandb)
 
     # -- processes
     def start_vision(self):
@@ -603,6 +615,46 @@ class Evaluation:
               f"({row['mean_speed_rad_s']:+.2f} rad/s, goal {row['goal_rad_s']:+.1f}), {row['drops']} drops, "
               f"tracked {row['tracked_fraction']:.0%}, motors {row['temp_max_start_c']:.0f} -> {row['temp_max_end_c']:.0f} C")
         print(f"  files in {run.run_dir}")
+        if self.args.wandb:
+            self.upload(run.run_dir, row["outcome"])
+
+    def upload(self, run_dir, outcome):
+        """The run to W&B in a background process (log: node_logs/wandb_upload.log), so the next run can start."""
+        if self.args.mock:
+            print("  not uploaded to W&B: a --mock run")
+            return
+        if outcome not in wandb_results.UPLOADED_OUTCOMES:
+            print(f"  not uploaded to W&B: {outcome}")
+            return
+        log_dir = self.out / "node_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [sys.executable, str(WANDB_RESULTS), "--entity", self.args.wandb_entity, "--project",
+               self.args.wandb_project, "upload", str(run_dir)] + (["--video"] if self.args.wandb_video else [])
+        with open(log_dir / "wandb_upload.log", "a") as log:
+            log.write(f"\n===== {datetime.now():%Y-%m-%d %H:%M:%S} {' '.join(cmd)}\n")
+            log.flush()
+            self.uploads.append((run_dir, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                                           start_new_session=True)))
+        print(f"  uploading to W&B ({self.args.wandb_entity}/{self.args.wandb_project}) in the background")
+
+    def wait_for_uploads(self, timeout=600):
+        """After the hand is off: wait for the uploads, and say which ones failed."""
+        if not self.uploads:
+            return
+        if any(p.poll() is None for _, p in self.uploads):
+            print("Waiting for the W&B upload(s) (Ctrl+C: stop waiting; they go on by themselves) ...")
+        t0 = time.time()
+        try:
+            while any(p.poll() is None for _, p in self.uploads) and time.time() - t0 < timeout:
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
+        failed = [str(d) for d, p in self.uploads if p.poll() not in (0, None)]
+        if failed:
+            print(f"W&B upload failed (see {self.out / 'node_logs/wandb_upload.log'}). Upload again with:\n"
+                  f"  python experiments/rl_inference/eval_policies.py --upload {' '.join(failed)}")
+        elif all(p.poll() == 0 for _, p in self.uploads):
+            print(f"Uploaded to W&B: https://wandb.ai/{self.args.wandb_entity}/{self.args.wandb_project}")
 
 
 class Run:
@@ -621,7 +673,7 @@ class Run:
         self.heat_pauses, self.pause_heat_s, self.pause_drop_s = 0, 0.0, 0.0
         self.trace = []              # every detection
         self.detection_elapsed = []  # policy time of the detections during policy time
-        self.health = []             # (wall seconds, state, temperatures, voltages, status bits)
+        self.health = []             # (wall seconds, policy seconds, state, temperatures, voltages, status bits)
         self.last_health = 0.0
 
     def begin(self, home, temps, speed):
@@ -678,7 +730,8 @@ class Run:
             return
         self.last_health = now
         temps = hand.temperatures()
-        self.health.append((round(now - self.t0, 1), state, temps, hand.voltage, hand.status_or.copy()))
+        self.health.append((round(now - self.t0, 1), round(self.elapsed(), 2), state, temps, hand.voltage,
+                            hand.status_or.copy()))
 
     def write(self, hand, end_temps, rates, camera_info, camera_tilt, camera_moved):
         a, joints, d = self.args, self.joint_ids, self.run_dir
@@ -688,7 +741,7 @@ class Run:
         nan = np.full(n, np.nan)
         start = nan if self.start_temps is None else np.asarray(self.start_temps)
         end = nan if end_temps is None else np.asarray(end_temps)
-        peak = np.nanmax([t for _, _, t, _, _ in self.health if t is not None] + [start, end], axis=0)
+        peak = np.nanmax([t for _, _, _, t, _, _ in self.health if t is not None] + [start, end], axis=0)
         hottest = int(np.nanargmax(peak)) if np.any(np.isfinite(peak)) else 0
 
         # how well the cube was seen during policy time
@@ -727,14 +780,24 @@ class Run:
             w.writerows(self.trace)
         with open(d / "temperatures.csv", "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["time_s", "state", *joints])
-            w.writerows([[t, state, *(np.round(temps, 1) if temps is not None else [""] * n)]
-                         for t, state, temps, _, _ in self.health])
+            w.writerow(["time_s", "policy_time_s", "state", *joints])
+            w.writerows([[t, pt, state, *(np.round(temps, 1) if temps is not None else [""] * n)]
+                         for t, pt, state, temps, _, _ in self.health])
         with open(d / "health.csv", "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["time_s", "state", *[f"voltage_v_{j}" for j in joints], *[f"status_{j}" for j in joints]])
-            w.writerows([[t, state, *(np.round(volt, 1) if volt is not None else [""] * n), *bits.tolist()]
-                         for t, state, _, volt, bits in self.health])
+            w.writerow(["time_s", "policy_time_s", "state", *[f"voltage_v_{j}" for j in joints],
+                        *[f"status_{j}" for j in joints]])
+            w.writerows([[t, pt, state, *(np.round(volt, 1) if volt is not None else [""] * n), *bits.tolist()]
+                         for t, pt, state, _, volt, bits in self.health])
+        # the turns at every counted detection, over policy time (positive = the commanded direction)
+        curve = [(t, self.sign * angle / (2 * np.pi)) for t, angle in counter.history]
+        with open(d / "turns.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["policy_time_s", "turns"])
+            w.writerows([[round(t, 3), round(c, 4)] for t, c in curve])
+        progress = progress_metrics([t for t, _ in curve], [c for _, c in curve], active)
+        before_drop = (self.sign * counter.angle_at(self.drop_times[0]) / (2 * np.pi) if self.drop_times
+                       else self.sign * counter.turns)
 
         errors = "; ".join(f"{j}: {'+'.join(status_names(b))}" for j, b in zip(joints, status) if b)
         row = dict(
@@ -744,6 +807,7 @@ class Run:
             wall_s=round(time.time() - self.t0, 1),
             turns=round(self.sign * counter.turns, 2),
             mean_speed_rad_s=round(self.sign * counter.angle / active, 3) if active > 0 else 0.0,
+            **progress, turns_before_first_drop=round(before_drop, 2),
             drops=self.drops, first_drop_s=self.drop_times[0] if self.drop_times else "",
             pause_drop_s=round(self.pause_drop_s, 1), heat_pauses=self.heat_pauses,
             pause_heat_s=round(self.pause_heat_s, 1),
@@ -765,7 +829,8 @@ class Run:
             **tracking_summary(tracking),
             min_voltage_v="" if not np.isfinite(hand.min_voltage) else round(hand.min_voltage, 1),
             servo_errors=errors, note=a.note, run_dir=str(d))
-        meta = dict(row, policy_time_segments=[round(s[0], 1) for s in self.segments], drop_times_s=self.drop_times,
+        meta = dict(row, policy_sha256_full=sha256(self.policy_path), host=socket.gethostname(),
+                    hand_config_sha256=sha256(HAND_CONFIG), policy_time_segments=[round(s[0], 1) for s in self.segments], drop_times_s=self.drop_times,
                     start_temps_c=dict(zip(joints, np.round(start, 1).tolist())),
                     end_temps_c=dict(zip(joints, np.round(end, 1).tolist())),
                     heating_c_per_s=None if rates is None else dict(zip(joints, np.round(rates, 4).tolist())),
@@ -845,12 +910,32 @@ def parse_args(argv=None):
     p.add_argument("--no-hand-launch", action="store_true", help="Use a hand controller that already runs.")
     p.add_argument("--pose-only", action="store_true", help="Move to the start pose, switch the torque off and exit.")
     p.add_argument("--camera-only", action="store_true", help="Only show the camera view; the hand is not started.")
+    p.add_argument("--wandb", action="store_true", help="Upload every finished run to W&B (rwr-skin/real_hand_eval, "
+                   "the format of the other real-hand evaluation) in the background. Needs `wandb login`.")
+    p.add_argument("--auto", action="store_true", help="Instead of policy files: list the models in --models-dir "
+                   "(*_policy.pt) that have no run on W&B yet (no run of the same file or the same model name), then "
+                   "evaluate them in alphabetical order. Implies --wandb.")
+    p.add_argument("--dry-run", action="store_true", help="With --auto: only list, start nothing.")
+    p.add_argument("--models-dir", type=Path, default=REPO / "models", help="Where --auto looks for models.")
+    p.add_argument("--upload", nargs="+", type=Path, metavar="RUN_DIR", help="Only upload these saved run folders to "
+                   "W&B (e.g. after a failed upload); runs already there are skipped.")
+    p.add_argument("--wandb-video", action="store_true", help="Also upload video.mp4 (about 25 MB per run).")
+    p.add_argument("--wandb-entity", default=wandb_results.ENTITY, help=argparse.SUPPRESS)
+    p.add_argument("--wandb-project", default=wandb_results.PROJECT, help=argparse.SUPPRESS)
     p.add_argument("--mock", action="store_true", help="No hardware: a drawn cube and a fake hand.")
     p.add_argument("--mock-drop-after", type=float, help="With --mock: the cube falls once after this many seconds.")
     p.add_argument("--mock-heat-rate", type=float, default=0.1, help="With --mock: heating of the fake motors.")
     args = p.parse_args(argv)
-    if not (args.policies or args.pose_only or args.camera_only):
-        p.error("give at least one policy file (or --pose-only / --camera-only)")
+    if args.auto and args.policies:
+        p.error("give policy files or --auto, not both")
+    if args.dry_run and not args.auto:
+        p.error("--dry-run goes with --auto")
+    if not (args.policies or args.pose_only or args.camera_only or args.auto or args.upload):
+        p.error("give at least one policy file (or --auto, --upload, --pose-only, --camera-only)")
+    args.wandb = args.wandb or args.auto
+    missing = [str(d) for d in args.upload or [] if not (d / "meta.json").is_file()]
+    if missing:
+        p.error(f"not run folders of this script (no meta.json): {', '.join(missing)}")
     missing = [str(f) for f in args.policies if not f.is_file()]
     if missing:
         p.error(f"not found: {', '.join(missing)}")
@@ -861,8 +946,38 @@ def _terminate(*_):
     raise KeyboardInterrupt
 
 
+def untested_policies(args):
+    """--auto: the models in --models-dir without a run on W&B, after listing them all."""
+    try:
+        project = wandb_results.Project(args.wandb_entity, args.wandb_project)
+        records = project.records()
+    except Exception as e:  # not installed, not logged in, offline
+        raise SystemExit(f"W&B is not reachable ({type(e).__name__}: {e}).\nInstall it and log in once: "
+                         "pip install wandb && wandb login")
+    todo, done = wandb_results.split_models(args.models_dir, wandb_results.known_models(records))
+    print(f"Models in {args.models_dir} against W&B {project.path} ({len(records)} runs):")
+    for path, why in done:
+        print(f"  tested    {path.name:28s} {why}")
+    for path in todo:
+        print(f"  untested  {path.name}")
+    print(f"{len(todo)} to evaluate" + (f": {', '.join(wandb_results.model_name(t) for t in todo)}" if todo else ""))
+    return todo
+
+
 def main(argv=None):
     args = parse_args(argv)
+    if args.upload:
+        try:
+            wandb_results.upload_runs(args.upload, video=args.wandb_video, entity=args.wandb_entity,
+                                      project=args.wandb_project)
+        except Exception as e:
+            print(f"W&B upload failed: {type(e).__name__}: {e}")
+            return 1
+        return 0
+    if args.auto:
+        args.policies = untested_policies(args)
+        if args.dry_run or not args.policies:
+            return 0
     Path(args.out).mkdir(parents=True, exist_ok=True)
     signal.signal(signal.SIGTERM, _terminate)
     if hasattr(signal, "SIGHUP"):
@@ -895,6 +1010,7 @@ def main(argv=None):
         code = 1
     finally:
         ev.shutdown()
+        ev.wait_for_uploads()
     return code
 
 

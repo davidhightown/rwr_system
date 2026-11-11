@@ -59,6 +59,12 @@ The Python package is called `faive_system` (e.g. `from faive_system.src.common.
    ```bash
      ./src/rwr_system/experiments/rl_inference/pose_estimation/download_models.sh
    ```
+7. For the real-hand evaluation's results on [W&B](https://wandb.ai) (project `rwr-skin/real_hand_eval`), log in once with your API key from [wandb.ai/authorize](https://wandb.ai/authorize). `wandb` comes with the `[all]` install of step 4:
+   ```bash
+     pixi run wandb login
+   ```
+
+     You need to be a member of the `rwr-skin` team: `pixi run python -c "import wandb; print(wandb.Api().viewer.teams)"` should list it.
 
 Run nodes with `ros2 run <package> <file>` and launch files with `ros2 launch <package> <launch file>`.
 
@@ -82,6 +88,12 @@ The commands to run the system are the same as on Linux; the code selects the pl
 
      If the repository is not in `~/ros_ws/src`, add `--base-paths /path/to/rwr_system` to the build command. In each new terminal, run `micromamba activate rwr_jazzy` and the `source` line again.
 3. For the RL task, download the cube detector's model files (step 6 above).
+4. For the real-hand evaluation's results on W&B, log in once (step 7 above). An environment created before `wandb` was added to `environment-macos.yml` needs it installed first:
+   ```bash
+     micromamba activate rwr_jazzy
+     pip install wandb   # only for an older environment
+     wandb login
+   ```
 
 Differences to Linux:
 
@@ -156,6 +168,28 @@ To check the hand without teleop or a policy, `experiments/fixed_command.py` pub
 ## Reinforcement learning: cube spin
 
 Run a policy trained in faive_lab on the hand, detect the cube, and calibrate the camera: see [experiments/README.md](experiments/README.md).
+
+### Deploy and evaluate policies on the real hand
+
+`experiments/rl_inference/eval_policies.py` runs exported policies one after another on the hand for 60 s each, counts the cube's turns with the camera from above, and uploads the results to W&B. One command starts the hand controller, the camera and a live window; do not start them yourself. Details (start pose, drops, heat pauses, all result columns): [experiments/README.md](experiments/README.md#evaluate-policies-on-the-real-hand).
+
+1. **Add the policy.** Copy the TorchScript file that faive_lab's `play.py` exports (`logs/rsl_rl/<experiment>/<run>/exported/policy.pt`, proprioceptive task `orca-v2-inhand-repose-v0`) to `models/<name>_policy.pt`. `<name>` is the model's name in the results and on W&B, so use the training run's name (e.g. `models/lark_policy.pt`).
+2. **Check the setup** (the hand is calibrated, the camera looks down at the palm on a USB 3 port, the W&B login of the installation is done):
+   ```bash
+     python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
+     python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
+   ```
+3. **Evaluate every new model.** `--auto` lists the models in `models/` and evaluates those that have no run on W&B yet (none of the same file and none of the same name), then uploads each run:
+   ```bash
+     python experiments/rl_inference/eval_policies.py --auto --dry-run   # only the list: tested / untested
+     python experiments/rl_inference/eval_policies.py --auto
+   ```
+
+     Or name the policies, and add `--wandb` to upload them: `python experiments/rl_inference/eval_policies.py --wandb models/lark_policy.pt models/ibex_policy.pt`. Without `--wandb` (or `--auto`) nothing is uploaded.
+4. **Run.** Put the cube in the palm; each run starts by itself when the cube lies still and the motors are cool enough. If the cube falls, put it back: the run goes on. Keys in the window: space = start or continue now, `n` = next policy, `q` = quit. Ctrl+C switches the torque off and stops.
+5. **Results.** Locally in `logs/real_eval/` (`results.csv` and a folder per run with the video). On W&B in [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval), in the same format as the other real-hand evaluation (one run per policy run, grouped by model, and the `leaderboard` run), with `eval.evaluator = eval_policies.py`. The upload runs in the background while the next policy starts. Only finished runs are uploaded (not skipped or aborted ones). Add `--wandb-video` to upload the videos too (about 25 MB each). If an upload failed (e.g. offline), the script prints the command to upload again, e.g. `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/20261111_203512_lark`.
+
+Compare runs of the same evaluator: the other evaluation ends a run at the first drop, this one continues after a drop. Its `result/turns_before_first_drop` is the figure that matches the other evaluation's `result/turns`, and the leaderboard has one row per model and evaluator. A run counts in the leaderboard only at the model's own goal speed (`--speed`, default 2 rad/s; for a model already on W&B it is the speed it was tested at there, e.g. 1.5 for ibex) and with a cold start (hottest motor at most 42.5 °C).
 
 ## Imitation learning
 

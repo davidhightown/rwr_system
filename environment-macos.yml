@@ -36,6 +36,7 @@ dependencies:
       - depthai<3  # the OAK-D node uses the depthai v2 API
       - pupil-apriltags
       - orca_core==0.5.2
+      - wandb  # real-hand evaluation results (eval_policies.py --wandb / --auto)
 variables:
   # macOS limits UDP datagrams to 9216 bytes by default, and FastDDS then delivers no camera images
   RMW_IMPLEMENTATION: rmw_cyclonedds_cpp

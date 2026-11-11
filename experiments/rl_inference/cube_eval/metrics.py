@@ -48,6 +48,33 @@ def joint_tracking(times, commands, measured, currents, joint_names, max_delay=0
     return out
 
 
+STALL_BAND = 0.125  # turns: less progress than this counts as none (as in the other evaluation's analysis.py)
+
+
+def progress_metrics(times, turns, duration):
+    """The cube's progress over policy time, defined as in the other evaluation (feat/real-hand-evaluation):
+    turns_30s (turns after 30 s, "" for a shorter run), best_10s_rad_per_s (the fastest 10 s), longest_stall_s (the
+    longest time with less than STALL_BAND turns of progress). times: policy seconds of the counted detections,
+    turns: the turns at those times (signed: positive = the commanded direction)."""
+    times, turns = np.asarray(times, dtype=float), np.asarray(turns, dtype=float)
+    t = np.concatenate([[0.0], times, [duration]])
+    c = np.concatenate([[0.0], turns, [turns[-1] if len(turns) else 0.0]])
+    turns_30s = round(float(np.interp(30.0, t, c)), 2) if duration >= 30.0 else ""
+    best = ""
+    if duration >= 10.0:
+        starts = np.arange(0.0, duration - 10.0 + 1e-9, 0.25)
+        best = round(float(np.max(np.interp(starts + 10.0, t, c) - np.interp(starts, t, c))) * 2 * np.pi / 10.0, 2)
+    stall = 0.0
+    for i in range(len(t)):
+        lo = hi = c[i]
+        j = i
+        while j + 1 < len(t) and max(hi, c[j + 1]) - min(lo, c[j + 1]) < STALL_BAND:
+            j += 1
+            lo, hi = min(lo, c[j]), max(hi, c[j])
+        stall = max(stall, t[j] - t[i])
+    return dict(turns_30s=turns_30s, best_10s_rad_per_s=best, longest_stall_s=round(float(stall), 1))
+
+
 def tracking_summary(rows):
     """The CSV fields of a run from joint_tracking()'s rows."""
     if not rows:
