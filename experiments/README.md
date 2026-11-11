@@ -27,6 +27,51 @@ Useful parameters (add each as `-p name:=value`):
 
 The joint limits, observation order and scales in the script must match the faive_lab task (`orca_v2_repose_env_cfg.py`).
 
+### Evaluate policies on the real hand
+
+`rl_inference/eval_policies.py` runs exported policies one after another on the real hand and counts the cube's turns with the camera. It is for policies without the cube pose (task `orca-v2-inhand-repose-v0`, 74 observations). One command starts the hand controller, the camera and the live window. It works on Linux and macOS, and it needs no camera calibration.
+
+**Before the first use**
+- The ROS workspace is built and sourced, and the hand is calibrated.
+- The detector's model files are downloaded: `rl_inference/pose_estimation/download_models.sh`.
+- An OAK camera looks down at the palm from above, on a USB 3 port. The script reads the camera itself, so the camera node must not run.
+
+**Run**
+```bash
+# only the camera view: check that the cube is found (the hand is not started)
+python experiments/rl_inference/eval_policies.py --camera-only
+
+# only move the hand to the start pose and switch the torque off
+python experiments/rl_inference/eval_policies.py --pose-only
+
+# evaluate two policies, 60 s each at 2 rad/s
+python experiments/rl_inference/eval_policies.py models/ibex_policy.pt models/crow_policy.pt
+```
+
+**The hand moves when the script starts**: to its neutral pose, then to the start pose (the neutral pose with the wrist flexed: 2° before the upper end of its range, `--start-wrist-deg` sets another angle). For each policy, the script then:
+
+1. switches the torque off and waits until the cube lies still in the palm and the motors are cool enough (see below), then counts down 3 s,
+2. runs the policy for 60 s (`--duration`) of policy time at 2 rad/s (`--speed`; the sign is the direction). The clock stands still during a pause:
+   - **The cube fell** (more than 6 cm from where it rested, or not seen for 3 s): the hand moves to the start pose and the torque goes off. Put the cube back; the run continues by itself when the cube lies still again. The space bar continues at once. After more than 5 drops (`--max-drops`) the run ends.
+   - **A motor reached 60 °C** (`--temp-limit`): the torque goes off where the hand is, without a movement. The run continues when the motors are cool enough for the rest of the time.
+3. moves back to the start pose, switches the torque off and writes the results.
+
+Keys in the camera window: space = start or continue now, `n` = next policy, `q` = quit. Ctrl+C in the terminal stops everything and switches the torque off.
+
+**When is a motor cool enough?** A run (or the rest of it) starts when every motor is expected to stay 2 °C below the limit until the end: temperature + heating rate × remaining seconds. The heating rate of each motor is the largest of its last 8 runs (`thermal_history.json` in the results folder). Until a motor has 3 runs, 0.25 °C/s is assumed, so a 60 s run starts below 43 °C. The window shows the mean and the hottest motor; the limit applies to the hottest one, because a single hot motor is what fails.
+
+**The window and the video** show the detected cube, the path of its centre over the last 8 s, where it rested (with the drop radius), the model, the policy time, the turns, the mean speed over the last 5 s, the drops and the motor temperatures. Turns are counted about the camera's viewing axis, positive in the direction of a positive `--speed`. The video leaves out cooling pauses.
+
+**Results** go to `logs/real_eval/` (`--out`):
+- `results.csv`: one row per run with the model, the policy file's hash, the git commit, the turns and mean speed, the drops and pauses, how well the cube was seen (`tracked_fraction`, `rejected_share`, `longest_gap_s`, `gap_s`), how far the cube moved from its resting place, the camera's tilt and whether it moved, the temperatures (mean and hottest, start and end, the fastest heating motor), the joints' delay and error against their commands, the motor currents, the lowest supply voltage and the servo faults.
+- one folder per run: `video.mp4`, `trace.csv` (every detection: pixel and position of the cube's centre, orientation), `joints.csv` (commanded and measured angles and currents, 100 Hz), `joint_tracking.csv` (delay, error and current per joint), `temperatures.csv` and `health.csv` (per motor, once per second), `meta.json`.
+
+A warning sign in a row: `tracked_fraction` well below 1, a `rejected_share` above about 0.1, or `gap_s` (the time in stretches of more than 0.6 s without a usable detection) above a few seconds. The turns are then less certain. On a Mac the detector reaches about 5 poses per second, which is enough up to about 3 rad/s; with an NVIDIA GPU it is faster.
+
+`--mock` runs the whole flow without hardware (a drawn cube and a fake hand; `--mock-drop-after 5` makes the cube fall once). `python -m pytest tests/test_cube_eval.py` tests the turn counting, the drop detection and the temperature rule.
+
+The hand controller publishes the motors' health in joint order: `/right/hand/motor_current` (mA, with every joint state), and once per second `/right/hand/motor_temperature` (°C), `/right/hand/motor_voltage` (V) and `/right/hand/motor_status` (the servos' status bytes: 0x01 input voltage, 0x02 angle sensor, 0x04 overheating, 0x08 overcurrent, 0x20 overload).
+
 ### Detect the cube
 
 The cube detector in `rl_inference/pose_estimation` finds the cube's corners in the OAK-D image and computes the cube pose from them (PnP).

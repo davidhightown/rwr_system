@@ -1,12 +1,16 @@
 """Count the cube's turns and detect a drop from detected cube poses in the camera frame. No ROS, no camera.
 
-A cube looks the same in 24 orientations, and the detector may name its corners differently from one frame to the
-next. The counter therefore predicts the cube's orientation from the last accepted one and the recent spin rate,
-compares each new detection with the prediction in all 24 variants and takes the closest. A detection further than
-``max_residual_deg`` from the prediction is a wrong detection and is ignored. This is right as long as the cube's
-motion differs by less than 45 degrees from the prediction between two accepted detections. After ``max_gap``
-seconds without an accepted detection the rotation in between is unknown: the counter starts anew from the next
-detection, and the gap is added to ``uncounted_s``.
+The counter predicts the cube's orientation from the last accepted detection and the recent spin rate. A detection
+further than ``max_residual_deg`` from the prediction is a wrong detection and is ignored; if the next detection
+shows that the last accepted one was the wrong one, that one is taken back. Time without an accepted detection for
+longer than ``max_gap`` seconds is added to ``gap_s``; the next detection is then taken whatever the prediction says.
+
+The detector tells the faces of the lettered cube apart (on the hand, 3 of 305 detections named them differently
+from the one before), so by default an orientation is taken as it is, and the count is right as long as the cube's
+motion differs by less than 180 degrees from the prediction between two detections. For a cube whose faces look
+alike, ``symmetric=True`` compares each detection in all 24 orientations in which a cube looks the same and takes
+the closest; the limit is then 45 degrees, max_residual_deg must be well below that (25), and the rotation during
+a gap is not counted.
 
 Times are the caller's clock. eval_policies.py passes the active run time, which stands still during a pause, so
 speeds are per second of policy time.
@@ -23,18 +27,21 @@ CUBE_SYMMETRIES = Rotation.create_group("O")  # the 24 rotations that map a cube
 class TurnCounter:
     """Accumulates the cube's rotation about ``up`` (unit vector in the camera frame, default: toward the camera)."""
 
-    def __init__(self, up=(0.0, 0.0, -1.0), max_residual_deg=25.0, max_gap=0.6, velocity_gain=0.3):
+    def __init__(self, up=(0.0, 0.0, -1.0), symmetric=False, max_residual_deg=None, max_gap=0.6, velocity_gain=0.3):
         self.up = np.asarray(up, dtype=float) / np.linalg.norm(up)
-        self.max_residual = np.radians(max_residual_deg)
+        self.symmetric = symmetric
+        self.max_residual = np.radians(max_residual_deg if max_residual_deg is not None else 25.0 if symmetric else 60.0)
         self.max_gap = max_gap
         self.velocity_gain = velocity_gain  # of the newest step in the running mean of the spin rate
         self.reference = None      # the last accepted orientation
+        self.anchor = None         # the orientation headings are measured against
+        self._tilted_before = False
         self.reference_time = None
         self.velocity = np.zeros(3)  # rad/s, rotation vector rate in the camera frame
         self.accepted = self.rejected = 0
         self.angle = 0.0        # rad about up, signed
         self.tilt_angle = 0.0   # rad about the other axes, added up
-        self.uncounted_s = 0.0  # time whose rotation could not be counted
+        self.gap_s = 0.0        # time without an accepted detection, in stretches longer than max_gap
         self.history = []       # (time, angle) at every accepted detection
         self._previous = None   # the state before the last accepted detection, to take that one back
 
@@ -47,14 +54,17 @@ class TurnCounter:
 
     def add(self, time, rotation):
         """Add a detection (scipy Rotation, cube in camera frame). Returns True if it was accepted."""
-        if self.reference is not None and time - self.reference_time > self.max_gap:
-            self.uncounted_s += time - self.reference_time
-            self.rebase()
+        after_gap = self.reference is not None and time - self.reference_time > self.max_gap
+        if after_gap:
+            self.gap_s += time - self.reference_time
+            if self.symmetric:  # which of the 24 orientations it is can no longer be told
+                self.rebase()
         if self.reference is None:
             self.reference, self.reference_time = rotation, time
+            self.anchor = rotation
             self.history.append((time, self.angle))
             return True
-        step = self._match(time, rotation)
+        step = self._match(time, rotation, force=after_gap)
         if step is None and self._previous is not None:
             # it does not follow the last accepted detection; if it follows the one before, the last one was wrong
             current = self._state()
@@ -70,35 +80,64 @@ class TurnCounter:
         self._previous = self._state()
         matched, step = step
         dt = time - self.reference_time
-        about_up = float(step @ self.up)
+        # the change of the cube's heading: the difference of two headings against a fixed orientation, not the
+        # step's own rotation, so that the noise of the single detections does not add up over a run
+        # (a heading is ill-defined for an orientation tilted far against the anchor: then the step's own rotation)
+        if max(self._swing(matched), self._swing(self.reference)) < np.radians(60):
+            about_up = self._heading(matched) - self._heading(self.reference)
+            about_up = float((about_up + np.pi) % (2 * np.pi) - np.pi)
+        else:
+            about_up = float(step @ self.up)
         self.angle += about_up
         self.tilt_angle += float(np.linalg.norm(step - about_up * self.up))
         if dt > 1e-3:
             self.velocity = (1 - self.velocity_gain) * self.velocity + self.velocity_gain * step / dt
         self.reference, self.reference_time = matched, time
+        # the heading against the anchor is ill-defined near 180 deg of tilt: take a new anchor when the cube has
+        # tilted far, but only once two detections in a row say so (one may be a wrong one)
+        tilted = self._swing(matched) > np.radians(60)
+        if tilted and self._tilted_before:
+            self.anchor = matched
+        self._tilted_before = tilted and self.anchor is not matched
         self.accepted += 1
         self.history.append((time, self.angle))
         return True
 
-    def _match(self, time, rotation):
-        """(the symmetric variant closest to the prediction, the step to it as a rotation vector), or None."""
+    def _match(self, time, rotation, force=False):
+        """(the orientation, the step to it from the reference as a rotation vector), or None for a wrong detection."""
         predicted = Rotation.from_rotvec(self.velocity * (time - self.reference_time)) * self.reference
-        candidates = rotation * CUBE_SYMMETRIES
-        residuals = (candidates * predicted.inv()).magnitude()
-        best = int(np.argmin(residuals))
-        if residuals[best] > self.max_residual:
+        if self.symmetric:
+            candidates = rotation * CUBE_SYMMETRIES
+            residuals = (candidates * predicted.inv()).magnitude()
+            rotation = candidates[int(np.argmin(residuals))]
+        if not force and (rotation * predicted.inv()).magnitude() > self.max_residual:
             return None
-        step = (candidates[best] * self.reference.inv()).as_rotvec()
+        step = (rotation * self.reference.inv()).as_rotvec()
         if np.linalg.norm(step) > np.pi * 0.99:  # a half turn has no direction
             return None
-        return candidates[best], step
+        return rotation, step
+
+    def _relative(self, rotation):
+        q = (rotation * self.anchor.inv()).as_quat()
+        return float(q[:3] @ self.up), float(q[3])
+
+    def _heading(self, rotation):
+        """The rotation about up that takes the anchor's orientation closest to this one (rad)."""
+        along, w = self._relative(rotation)
+        return 2.0 * np.arctan2(along, w)
+
+    def _swing(self, rotation):
+        """How far this orientation is tilted against the anchor's, apart from the heading (rad)."""
+        along, w = self._relative(rotation)
+        return 2.0 * np.arccos(np.clip(np.hypot(along, w), 0.0, 1.0))
 
     def _state(self):
         return (self.reference, self.reference_time, self.velocity.copy(), self.angle, self.tilt_angle,
-                self.accepted, len(self.history))
+                self.accepted, len(self.history), self.anchor)
 
     def _restore(self, state):
-        self.reference, self.reference_time, self.velocity, self.angle, self.tilt_angle, self.accepted, n = state
+        (self.reference, self.reference_time, self.velocity, self.angle, self.tilt_angle, self.accepted, n,
+         self.anchor) = state
         self.velocity = self.velocity.copy()
         del self.history[n:]
 

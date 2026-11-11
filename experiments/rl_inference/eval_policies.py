@@ -750,7 +750,7 @@ class Run:
             tracked_fraction=round(max(0.0, tracked), 3),
             detections_per_s=round(len(self.detection_elapsed) / active, 1) if active > 0 else 0.0,
             rejected_share=round(counter.rejected_share, 3), longest_gap_s=round(float(np.max(gaps)), 2),
-            uncounted_s=round(counter.uncounted_s, 1),
+            gap_s=round(counter.gap_s, 1),
             tilt_turns=round(counter.tilt_angle / (2 * np.pi), 2),
             cube_offset_mean_mm=round(float(np.mean(offsets)) * 1000, 1),
             cube_offset_max_mm=round(float(np.max(offsets)) * 1000, 1),

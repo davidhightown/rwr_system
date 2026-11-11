@@ -29,7 +29,7 @@ def spin(counter, rate, seconds, hz, rng=None, relabel=False, t0=0.0, base=Rotat
 
 @pytest.mark.parametrize("rate", [2.0, -2.0, 0.7])
 def test_turns_at_detector_rate_with_symmetric_relabelling(rate):
-    counter = TurnCounter(up=UP)
+    counter = TurnCounter(up=UP, symmetric=True)
     spin(counter, rate, 60.0, 5.0, np.random.default_rng(0), relabel=True,
          base=Rotation.from_euler("xyz", [0.3, -0.2, 1.0]))
     assert counter.turns == pytest.approx(rate * 60 / (2 * np.pi), abs=0.01)
@@ -50,16 +50,39 @@ def test_wrong_detections_are_rejected_and_do_not_count():
     assert 0 < counter.rejected_share < 0.1
 
 
-def test_a_long_gap_is_not_counted_but_reported():
-    counter = TurnCounter(up=UP, max_gap=0.6)
+@pytest.mark.parametrize("rate", [0.55, 2.0, 0.0])
+@pytest.mark.parametrize("outlier_deg, tolerance", [(10, 0.12), (50, 0.5)])
+def test_noisy_poses_of_a_lettered_cube_do_not_drift(rate, outlier_deg, tolerance):
+    """As on the hand: 5 detections per second and 10 deg of noise on every axis of every pose; in the second
+    case every 15th pose is far off (much more often than on the hand)."""
+    for seed in range(4):
+        rng = np.random.default_rng(seed)
+        counter = TurnCounter(up=UP)
+        for i in range(301):
+            t = i * 0.2
+            noise = Rotation.from_rotvec(rng.normal(size=3) * np.radians(10 if i % 15 else outlier_deg))
+            counter.add(t, noise * Rotation.from_rotvec(UP * rate * t))
+        assert counter.turns == pytest.approx(rate * 60 / (2 * np.pi), abs=tolerance)
+
+
+def test_a_gap_is_not_counted_for_a_symmetric_cube():
+    counter = TurnCounter(up=UP, symmetric=True, max_gap=0.6)
     spin(counter, 2.0, 5.0, 10.0)
     spin(counter, 2.0, 5.0, 10.0, t0=7.0)  # nothing seen for 2 s
     assert counter.turns == pytest.approx(20 / (2 * np.pi), abs=0.01)
-    assert counter.uncounted_s == pytest.approx(2.0)
+    assert counter.gap_s == pytest.approx(2.0)
+
+
+def test_a_lettered_cube_is_counted_across_a_gap():
+    counter = TurnCounter(up=UP, max_gap=0.6)
+    for t in list(np.arange(0, 5.01, 0.1)) + list(np.arange(6.0, 10.01, 0.1)):  # nothing seen for 1 s: 115 deg
+        counter.add(t, Rotation.from_rotvec(UP * 2.0 * t))
+    assert counter.turns == pytest.approx(20 / (2 * np.pi), abs=0.01)
+    assert counter.gap_s == pytest.approx(1.0)
 
 
 def test_fast_spin_beyond_the_plain_symmetry_limit():
-    counter = TurnCounter(up=UP)  # 60 deg per detection: only the prediction keeps this countable
+    counter = TurnCounter(up=UP, symmetric=True)  # 60 deg per detection: only the prediction keeps this countable
     for i in range(200):
         t = i * 0.2
         counter.add(t, Rotation.from_rotvec(UP * (0.5 * min(t, 5.2) ** 2 + max(0.0, t - 5.2) * 5.2)))
