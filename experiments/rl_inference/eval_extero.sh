@@ -3,16 +3,19 @@
 # hand-to-tag pose of our setup filled in. Every other option of eval_policies.py works as usual and is passed on;
 # a later --hand-to-tag, --calibration or --speed overrides the values below.
 #
-#   experiments/rl_inference/eval_extero.sh chameleon              # evaluate models_extero/chameleon_policy.pt
+#   experiments/rl_inference/eval_extero.sh extero_meerkat         # evaluate models_extero/extero_meerkat_policy.pt
 #   experiments/rl_inference/eval_extero.sh --camera-only          # only the camera: prints the cube pose the policy
 #                                                                  # would get; cube in the palm ~ (0, 0, -0.05)
-#   experiments/rl_inference/eval_extero.sh chameleon --wandb      # and upload the run
+#   experiments/rl_inference/eval_extero.sh extero_meerkat --wandb # and upload the run (without --wandb: no upload)
+#
+# Give a model name: without one, eval_policies.py switches to --auto, which uploads to W&B.
 #
 # Calibration: $RWR_CALIBRATION, default ~/camera_extrinsics.npy (apriltag_calibration.py --tag-id 9 --tag-size 0.08).
 # Redo it whenever the camera or the tag moved.
 # Hand to tag (m, deg): measured 2026-11-12 (sketch: tag 400 mm from the stand, mount 262 - 28 sin 30 mm high, forearm
 # 30 deg down), yaw checked with show_tag_axes.py, y corrected to -0.04 from the cube in the palm in RViz.
-# Speed: 1.5 rad/s, the top of chameleon's training range (0.9-1.5) and the speed its parent crow ran at on the hand.
+# Speed: 1.5 rad/s, in the training range of both extero models (meerkat 1.5-2.2, chameleon up to 1.5) and the speed
+# their parents ibex and crow ran at on the hand.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
