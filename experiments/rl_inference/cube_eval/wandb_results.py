@@ -117,9 +117,14 @@ def retry(call, attempts=4):
 
 
 # -- what W&B knows (records: {"id", "job_type", "config", "summary"} per W&B run)
+def setting(mode="", action_alpha=0.2):
+    """How a run ran its policy: (eval_policies.py --mode, action alpha); older runs: ("", 0.2)."""
+    return mode or "", round(number(action_alpha) or 0.2, 3)
+
+
 def known_models(records):
-    """{short name: dict(name, shas, runs, idx, description, created, checkpoint_iteration, train, sim, own_goal)} from
-    the real_hand runs on W&B. The first record that has a field gives it."""
+    """{short name: dict(name, shas, runs, settings, idx, description, created, checkpoint_iteration, train, sim,
+    own_goal)} from the real_hand runs on W&B. The first record that has a field gives it."""
     out = {}
     for r in records:
         if r.get("job_type") != "real_hand":
@@ -129,8 +134,10 @@ def known_models(records):
         short = m.get("short_name") or m.get("name")
         if not short:
             continue
-        k = out.setdefault(short, dict(name=m.get("name") or short, shas=set(), runs=0))
+        k = out.setdefault(short, dict(name=m.get("name") or short, shas=set(), runs=0, settings=set()))
         k["runs"] += 1
+        e = config.get("eval") or {}
+        k["settings"].add(setting(e.get("mode"), e.get("action_alpha")))
         if m.get("policy_sha256"):
             k["shas"].add(m["policy_sha256"])
         for key in ("idx", "description", "created", "checkpoint_iteration"):
@@ -174,21 +181,24 @@ def runs(entry):
     return f"{entry['runs']} run" + ("s" if entry["runs"] != 1 else "")
 
 
-def tested_because(known, name, sha):
-    """Why a model counts as tested ("" = it does not)."""
+def tested_because(known, name, sha, run_setting=None):
+    """Why a model counts as tested ("" = it does not); with run_setting (setting()), only runs with that setting
+    count (a run without the --mode or the action alpha the model needs says nothing about it)."""
+    ok = lambda k: run_setting is None or run_setting in k.get("settings", {setting()})  # noqa: E731
     if sha:
         for short, k in known.items():
-            if sha in k["shas"]:
+            if sha in k["shas"] and ok(k):
                 return f"same file as {k['name']} ({runs(k)} on W&B)"
     short, k = find_model(known, name)
-    return f"{k['name']} has {runs(k)} on W&B" if k else ""
+    return f"{k['name']} has {runs(k)} on W&B" if k and ok(k) else ""
 
 
-def split_models(models_dir, known):
-    """The models in models_dir (*_policy.pt, by name): ([untested files], [(tested file, why)])."""
+def split_models(models_dir, known, setting_of=None):
+    """The models in models_dir (*_policy.pt, by name): ([untested files], [(tested file, why)]). setting_of: the
+    setting() a model file needs, if only runs with it count."""
     todo, done = [], []
     for path in sorted(Path(models_dir).glob("*_policy.pt")):
-        why = tested_because(known, model_name(path), sha256(path))
+        why = tested_because(known, model_name(path), sha256(path), setting_of(path) if setting_of else None)
         (done.append((path, why)) if why else todo.append(path))
     return todo, done
 
@@ -216,6 +226,7 @@ def config_of(meta, run_dir, known):
     commit = str(meta.get("git_commit", ""))
     sim = dict(k.get("sim") or {})
     observations = number(meta.get("observations")) or OBS_DIM_PROPRIO  # older runs: all proprioceptive
+    cube_pose = meta.get("cube_pose", observations > OBS_DIM_PROPRIO)  # older runs: 74 or 82 observations
     return dict(
         model=dict(name=k.get("name", name), short_name=short or name, idx=k.get("idx"),
                    description=k.get("description", ""), checkpoint_iteration=k.get("checkpoint_iteration"),
@@ -224,8 +235,9 @@ def config_of(meta, run_dir, known):
         sim=sim,
         eval=dict(evaluator=EVALUATOR, session=run_dir.parent.name, run_folder=run_dir.name,
                   started=meta.get("time", ""), date=str(meta.get("time", ""))[:10], note=meta.get("note", ""),
-                  host=meta.get("host", ""), observations=int(observations),
-                  cube_pose=observations > OBS_DIM_PROPRIO, goal_rad_s=goal, own_goal_rad_s=own,
+                  host=meta.get("host", ""), observations=int(observations), cube_pose=bool(cube_pose),
+                  mode=meta.get("mode") or "", axis=meta.get("axis") or "z",
+                  action_alpha=number(meta.get("action_alpha")) or 0.2, goal_rad_s=goal, own_goal_rad_s=own,
                   at_own_goal=own is None or goal is None or abs(goal - own) <= 1e-6,
                   start_temp_max_c=start, cold_start=start is None or start <= MAX_START_C,
                   reference=k.get("name", name) == REFERENCE_MODEL,
@@ -317,6 +329,8 @@ def leaderboard_rows(records):
         config, s = r.get("config") or {}, r.get("summary") or {}
         e, m = config.get("eval") or {}, config.get("model") or {}
         if not (e.get("at_own_goal", True) and e.get("cold_start", True)) or number(s.get("result/turns")) is None:
+            continue
+        if e.get("axis", "z") != "z" or e.get("mode") == "goals":  # turns about z only
             continue
         groups.setdefault(m.get("name") or m.get("short_name") or "?", []).append(r)
     rows = []
@@ -431,6 +445,9 @@ def upload_runs(run_dirs, video=False, entity=ENTITY, project=PROJECT):
         meta = json.loads((d / "meta.json").read_text())
         if meta.get("outcome") not in UPLOADED_OUTCOMES:
             print(f"  {d.name}: not uploaded ({meta.get('outcome')})")
+            continue
+        if meta.get("mode") == "goals":
+            print(f"  {d.name}: not uploaded (a run of the goal task; the leaderboard is for spinning)")
             continue
         url, record = p.upload(d, video=video, records=records, wandb_dir=d.parent)
         if record is None:

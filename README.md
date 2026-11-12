@@ -187,9 +187,10 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
 
 `experiments/rl_inference/eval_policies.py` runs exported policies one after another on the hand for 60 s each, counts the cube's turns with the camera from above, and uploads the results to W&B. One command starts the hand controller, the camera and a live window; do not start them yourself. Details (start pose, drops, heat pauses, all result columns): [experiments/README.md](experiments/README.md#evaluate-policies-on-the-real-hand).
 
-1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio` or `rwr-skin/orca_extero`. This copies those not yet here to `models_proprio/<name>_policy.pt` and `models_extero/<name>_policy.pt` (with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit). Files already there are left alone. Both folders are git-ignored.
+1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio` or `rwr-skin/orca_extero`. This copies those not yet here to `models_proprio/<name>_policy.pt` and `models_extero/<name>_policy.pt` (with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit, and what the training run used: action alpha, actor observations, history, commands). Files already there are left alone. Both folders are git-ignored.
    ```bash
        python experiments/rl_inference/download_policies.py             # --dry-run: only list the new ones
+       python experiments/rl_inference/download_policies.py --update-info   # add the training info to older .json files
    ```
    ```
    The steps below evaluate the proprioceptive policies in `models_proprio/`. For the policies in `models_extero/`, see [Policies with the cube pose](#policies-with-the-cube-pose) below.
@@ -201,7 +202,7 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
        python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
        python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
    ```
-3. **Evaluate every untested model.** Without arguments the script lists the models in `models_proprio/` with no run on W&B yet (none of the same file and none of the same name), sets aside those it cannot run (teachers and history students, which take other observations than the 74 proprioceptive ones), and after Enter evaluates the rest and uploads each run:
+3. **Evaluate every untested model.** Without arguments the script lists the models in `models_proprio/` with no run on W&B yet (none of the same file and none of the same name), sets aside those that need other arguments with a hint (e.g. `not evaluated: a distilled student with an LSTM: try --mode student`, see [Special modes](#special-modes) below), and after Enter evaluates the rest and uploads each run:
    ```bash
        python experiments/rl_inference/eval_policies.py --dry-run   # only the list: tested / untested
        python experiments/rl_inference/eval_policies.py
@@ -231,7 +232,7 @@ The same script runs the policies of the extero task (`orca-v2-inhand-repose-ext
        source ~/ros_ws/install/setup.zsh
        python3 experiments/rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.075 --output ~/camera_extrinsics.npy --visualize
    ```
-2. **Measure the tag's pose from the mount** (the centre of the forearm's flat bottom face): `X Y Z` in metres and `ROLL PITCH YAW` in degrees, along the mount's axes (x from the index finger towards the little finger, y out of the palm, z up the forearm). These are the `hand_to_tag_`* arguments of `cube_spin_v2.launch.py`, see [Set the hand's position](experiments/README.md#set-the-hands-position). The default (`0 0.05 0.055 90 0 180`) was measured for the ORCA v1b mount, so measure your own. In the commands below, replace `X Y Z ROLL PITCH YAW` with your six numbers (e.g. `--hand-to-tag 0 0.15 0 180 0 0`), or leave out `--hand-to-tag` to use the default.
+2. **Measure the tag's pose from the mount** (the centre of the forearm's flat bottom face): `X Y Z` in metres and `ROLL PITCH YAW` in degrees, along the mount's axes (x from the index finger towards the little finger, y out of the palm, z up the forearm). These are the `hand_to_tag_`* arguments of `cube_spin_v2.launch.py`, see [Set the hand's position](experiments/README.md#set-the-hands-position). The default (`0 0.05 0.055 90 0 180`) was measured for the ORCA v1b mount, so measure your own. In the commands below, replace `X Y Z ROLL PITCH YAW` with your six numbers (e.g. `--hand-to-tag 0 0.15 0 180 0 0`), or leave out `--hand-to-tag` to use the default. To find or check them by eye, `python experiments/rl_inference/tune_hand_to_tag.py --calibration <file>.npy` moves the hand to the start pose and shows the hand and the live cube in RViz with six sliders for the values; put the cube in the palm and move the sliders until the virtual cube sits where the real one does (`s` saves them into the `.yaml` next to the calibration).
 3. **Check the cube pose.** With the cube in the palm, the printed position is a few cm from (0, 0, -0.05), +z up. If not, fix the calibration or the tag's pose first:
    ```bash
        python experiments/rl_inference/eval_policies.py --camera-only \
@@ -244,9 +245,21 @@ The same script runs the policies of the extero task (`orca-v2-inhand-repose-ext
        python experiments/rl_inference/eval_policies.py --models-dir models_extero \
            --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW --wandb <name>
    ```
-   ```
    The run itself works as above (start pose, drops, keys). Each run also writes `cube_obs.csv` (what the policy saw at each step), and `results.csv` gets `cube_obs_tracked_fraction`: the share of policy steps with a cube pose at most `--cube-pose-timeout` (0.25 s) old.
-   ```
+
+   **Digital twin.** With `--calibration`, the hand model in its measured joint angles and the cube where the policy sees it (in the simulation's frame, with the goal position as a green dot) are shown in the top right corner of the camera window, and so in `video.mp4`, and in a separate RViz window. The cube turns red while it is lost: the policy then gets its last pose. With `--camera-only` the hand stays in the start pose, so the cube's place in the palm shows whether the calibration is right. `--no-twin` turns both off; `--twin` turns them on without a calibration (e.g. with `--mock`). If the RViz window is closed, the evaluation goes on (log: `node_logs/twin.log`).
+
+#### Special modes
+
+Some policies were trained on other tasks or with other observations. The script never runs them on its own: the listing names the arguments each one needs, and a run with those arguments evaluates only the models that need them (`--dry-run` shows which). A model counts as tested only with runs in the setting it needs.
+
+- `--mode student`: distilled students with an LSTM (`cygnet_lstm`, `lark_lstm`; the memory is cleared at every reset) or with 10 steps of history of every observation (740 inputs: `cygnet_hist`, `lark_hist`).
+- `--mode history`: 5 steps of history of the joint positions and the last joint commands (210 inputs: `newt`, `tapir`).
+- `--mode all-axes --axis x|y|z`: policies trained to spin about every axis (`lemur`). Needs `--calibration` (or `--mock`) for x and y; the turns are counted about that axis. Runs about x and y are on W&B but not in the leaderboard.
+- `--mode goals`: the goal task (`manta`, 84 inputs): the policy turns the cube to random orientations; a goal counts as reached within `--goal-tolerance` (0.4 rad). The score is the goals in a row (`goals`, `goals_before_first_drop`); a run ends after `--goal-timeout` (80 s) without a goal, and lasts 120 s by default. Needs `--calibration`. Not uploaded to W&B.
+- `--action-alpha A`: policies trained with another action alpha than 0.2 (`paca_alpha05`, `paca_alpha08`).
+
+Teachers that take the 218 privileged observations of the simulation (`swan`, `lark`) cannot run on the hand in any mode.
 
 ## Imitation learning
 

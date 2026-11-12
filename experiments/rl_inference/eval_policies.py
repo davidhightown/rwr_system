@@ -43,6 +43,26 @@ real-hand evaluation (cube_eval/wandb_results.py), in a background process while
 Without policy files (= --auto) the script lists the models in --models-dir (default models_proprio/, filled by
 download_policies.py) that have no run on W&B yet, and evaluates and uploads them after Enter.
 
+Special modes. Without --mode the script runs only the policies of the two spin tasks (74 or 82 observations, action
+alpha 0.2). The others are not started: --auto lists them with what they need, e.g. "not evaluated: a distilled
+student with an LSTM: try --mode student", and with that --mode it runs those (and only those) policies:
+
+    --mode student     distilled students: 10 steps of history of every observation (740), or an LSTM, whose memory
+                       is cleared at every start and after every pause (cygnet_hist, lark_hist, cygnet_lstm, lark_lstm)
+    --mode history     ADR runs with 5 steps of history of the joint positions and commands (210; newt, tapir)
+    --mode all-axes    the all-axes task (lemur): the spin command about --axis x, y or z, and the turns counted about
+                       that axis as the camera sees it (needs --calibration); the default speed is the top of the
+                       model's training range about the axis
+    --mode goals       the goal task (manta, after DeXtreme): a random goal orientation, the next one as soon as the
+                       tracked cube is within --goal-tolerance (0.4 rad) of it; the score is the number of goals before
+                       the first drop, the run ends after --goal-timeout s without a goal; 120 s by default, not
+                       uploaded to W&B (its leaderboard is for spinning), goals.csv with the time of every goal
+    --action-alpha A   policies trained with another action alpha (paca_alpha05, paca_alpha08)
+
+The script knows what a policy needs from its input size and the training info that download_policies.py saves in
+its .json (run download_policies.py --update-info for older ones). Teachers whose actor takes the critic's privileged
+observations (swan, lark: 218) cannot run on the hand in any mode.
+
 Policies with the cube pose (task orca-v2-inhand-repose-extero-v0) get the camera's cube pose in the frame of the
 simulation, as policy_inference_cube_spin_v2.py on feat/exteroception-deployment gives it (cube_spin_policy.CubePose):
 the newest pose with the flag 1, or the last one with the flag 0 when it is older than --cube-pose-timeout. For that the
@@ -51,11 +71,18 @@ camera where it is now) and --hand-to-tag (the hand_to_tag_* arguments of cube_s
 --calibration prints the cube's position in the frame of the simulation: with the cube in the palm it is a few cm from
 (0, 0, -0.05), +z up. Such runs also write cube_obs.csv (what the policy saw at each step).
 
+With --calibration (or --twin), a digital twin shows the hand model in its measured pose and the cube where the
+policy sees it, red while it is lost, in the simulation's frame with the goal position: in an RViz window
+(cube_eval/twin.py) and in the top right corner of the camera view and its video (cube_eval/twin_render.py). With
+--camera-only the hand is shown in the start pose, so the cube's place in the palm checks the calibration. --no-twin
+turns it off.
+
 Works on Linux and macOS. The cube detector uses CUDA, Apple's GPU or the CPU, whichever is there.
 """
 
 import argparse
 import csv
+import functools
 import hashlib
 import json
 import multiprocessing
@@ -92,6 +119,12 @@ WANDB_RESULTS = HERE / "cube_eval/wandb_results.py"
 POLICY_HZ = 20.0
 COUNTDOWN_S = 3.0
 STALE_JOINTS_S = 2.0
+MODES = {  # --mode: the policies it runs
+    "student": "distilled students, with 10 steps of history of every observation or with an LSTM",
+    "history": "ADR runs with 5 steps of history of the joint positions and commands (210 observations)",
+    "goals": "the goal task (84 observations): random goal orientations, scored by the goals reached",
+    "all-axes": "the all-axes task: spin about x, y or z (--axis)",
+}
 
 
 class Quit(Exception):
@@ -106,7 +139,6 @@ class HandLink:
     """The ROS side: the hand controller's topics and torque service, and the policy loop at 20 Hz."""
 
     def __init__(self, joint_ids, cube_pose_timeout):
-        import rclpy
         from cube_spin_policy import CubePose
         from rclpy.callback_groups import ReentrantCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
@@ -129,6 +161,7 @@ class HandLink:
         self.joint_log = []     # (policy time, command, measured, current) while the policy runs
         self.cube = CubePose(cube_pose_timeout)  # the cube pose for policies of the extero task
         self.cube_log = []      # (policy time, cube pose observation) while such a policy runs
+        self.goal_log = []      # policy time of every goal orientation reached (--mode goals)
         self.torque_on = None
 
         self.node = Node("cube_spin_evaluation")
@@ -147,7 +180,6 @@ class HandLink:
         self.executor = MultiThreadedExecutor(num_threads=3)
         self.executor.add_node(self.node)
         threading.Thread(target=self.executor.spin, daemon=True).start()
-        self._rclpy = rclpy
 
     # -- callbacks (executor threads)
     def _position(self, msg):
@@ -181,11 +213,15 @@ class HandLink:
             if not self.policy_on or self.q is None or self.qd is None:
                 return
             cube = self.cube.observation(time.time()) if self.policy.use_cube_pose else None
+            goals = self.policy.goals
+            reached = goals.reached if goals is not None else 0
             out = self.policy.step(self.q, self.qd, cube)
             if out is None:
                 return
             if cube is not None and self.clock is not None:
                 self.cube_log.append((self.clock(), cube))
+            if goals is not None and goals.reached > reached and self.clock is not None:
+                self.goal_log.append(self.clock())
             self.last_command = np.asarray(out[0], dtype=np.float64)
             command = self.last_command
         self._publish(command)
@@ -275,6 +311,11 @@ class Evaluation:
         self.hand_T_camera = camera_in_hand(args)  # None: no policies with the cube pose
         self.last_cube_print = 0.0
 
+        self.ros = None             # rclpy once initialised
+        self.twin = None            # the digital twin (--twin)
+        self.twin_stopped = False
+        self.twin_image_q = None    # its panels for the camera process's frame
+        self.twin_render_process = self.twin_render_stop = None
         self.hand = None
         self.hand_process = None
         self.vision_process = None
@@ -294,12 +335,14 @@ class Evaluation:
     def start_vision(self):
         ctx = multiprocessing.get_context("spawn")
         self.status_q, self.events_q, self.vision_stop = ctx.Queue(), ctx.Queue(), ctx.Event()
+        if self.args.twin:
+            self.twin_image_q = ctx.Queue(maxsize=1)
         a = self.args
         config = dict(mock=a.mock, mock_drop_after=a.mock_drop_after, exposure_us=a.exposure_us, iso=a.iso,
                       camera_id=a.camera_id, detector_ckpt=str(a.detector), device=a.device, cube_edge=a.cube_edge,
                       window=not a.no_window)
-        self.vision_process = ctx.Process(target=vision.run, args=(config, self.status_q, self.events_q, self.vision_stop),
-                                          daemon=True)
+        self.vision_process = ctx.Process(target=vision.run, args=(config, self.status_q, self.events_q, self.vision_stop,
+                                                                   self.twin_image_q), daemon=True)
         self.vision_process.start()
         print("Starting the camera and the cube detector ...")
         t0 = time.time()
@@ -316,10 +359,33 @@ class Evaluation:
         if "HIGH" in i["usb"] or "FULL" in i["usb"] or "LOW" in i["usb"]:
             print("  WARNING: the camera is on a slow USB connection; use a USB 3 port and cable")
 
+    def init_ros(self):
+        if self.ros is None:
+            import rclpy
+            from rclpy.signals import SignalHandlerOptions
+            rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must reach our own clean-up
+            self.ros = rclpy
+
+    def start_twin(self):
+        """The twin in RViz and, with the camera process, in its video (twin_render in a process of its own)."""
+        from cube_eval import twin_render
+        from cube_eval.twin import Twin
+        self.init_ros()
+        state_q = None
+        if self.twin_image_q is not None:
+            ctx = multiprocessing.get_context("spawn")
+            state_q, self.twin_render_stop = ctx.Queue(maxsize=1), ctx.Event()
+            self.twin_render_process = ctx.Process(target=twin_render.run, daemon=True, args=(
+                state_q, self.twin_image_q, self.twin_render_stop, self.joint_ids, self.args.cube_edge))
+            self.twin_render_process.start()
+        self.twin = Twin(self.joint_ids, np.deg2rad(self.start_pose), self.args.cube_edge, self.args.cube_pose_timeout,
+                         self.out / "node_logs", panel_q=state_q)
+        self.twin.start()
+        print("Starting the digital twin (RViz" + (" and in the video" if state_q is not None else "") +
+              "): the hand as measured, the cube as the policy sees it.")
+
     def start_hand(self):
-        import rclpy
-        from rclpy.signals import SignalHandlerOptions
-        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must reach our own clean-up
+        self.init_ros()
         self.hand = HandLink(self.joint_ids, self.args.cube_pose_timeout)
         a = self.args
         if not a.no_hand_launch:
@@ -381,8 +447,15 @@ class Evaluation:
                     continue
                 except ProcessLookupError:
                     break
-        if self.hand is not None:
-            self.hand._rclpy.try_shutdown()
+        if self.twin_render_process is not None:
+            self.twin_render_stop.set()
+            self.twin_render_process.join(timeout=3)
+            if self.twin_render_process.is_alive():
+                self.twin_render_process.terminate()
+        if self.twin is not None:
+            self.twin.stop()
+        if self.ros is not None:
+            self.ros.try_shutdown()
 
     # -- the loop body: events from the camera process, status to it
     def pump(self):
@@ -398,8 +471,12 @@ class Evaluation:
                 position, rotation = np.array(position), Rotation.from_quat(quat)
                 self.pose = (stamp, position, rotation)
                 self.rest.add(stamp, position)
-                if self.hand is not None and self.hand_T_camera is not None:
-                    self.hand.cube_detection(stamp, self.hand_T_camera @ transform(position, rotation))
+                if self.hand_T_camera is not None:
+                    hand_T_cube = self.hand_T_camera @ transform(position, rotation)
+                    if self.hand is not None:
+                        self.hand.cube_detection(stamp, hand_T_cube)
+                    if self.twin is not None:
+                        self.twin.cube_detection(stamp, hand_T_cube)
                 if self.run is not None:
                     self.run.detection(stamp, position, rotation, pixel)
             elif kind == "key":
@@ -417,6 +494,14 @@ class Evaluation:
         self.pump()
         if self.vision_process is not None and not self.vision_process.is_alive():
             raise RuntimeError("the camera process stopped")
+        if self.twin is not None and not self.twin_stopped:
+            if self.twin.stopped():
+                self.twin_stopped = True
+                print(f"  The digital twin's {self.twin.stopped()} stopped (window closed?); the evaluation goes on. "
+                      f"See {self.out / 'node_logs/twin.log'}")
+            elif self.twin_render_process is not None and not self.twin_render_process.is_alive():
+                self.twin_stopped = True
+                print("  The digital twin in the video stopped (see the error above); the evaluation goes on.")
         now = time.time()
         if self.status_q is not None and now - self.last_status_push >= 0.1:
             self.last_status_push = now
@@ -531,15 +616,20 @@ class Evaluation:
         from cube_spin_policy import CubeSpinPolicy
         a = self.args
         name = policy_path.stem.removesuffix("_policy")
-        policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed, use_cube_pose=None)
+        policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed, use_cube_pose=None,
+                                action_alpha=a.action_alpha, axis=a.axis, goal_tolerance=a.goal_tolerance)
         run_dir = self.out / f"{datetime.now():%Y%m%d_%H%M%S}_{name}"
         run_dir.mkdir(parents=True)
-        run = Run(name, policy_path, run_dir, a, self.joint_ids, policy.obs_dim, self.hand_T_camera)
-        label = f"{name}{' (cube pose)' if policy.use_cube_pose else ''}"
-        self.status.update(model=f"{label}   goal {speed:+.1f} rad/s", duration=a.duration, goal=speed, home=None,
+        run = Run(name, policy_path, run_dir, a, self.joint_ids, policy, self.hand_T_camera)
+        label = name + "".join(f" ({x})" for x in (a.mode, "cube pose" if policy.use_cube_pose else "",
+                                                     f"alpha {a.action_alpha:g}" if a.action_alpha != 0.2 else "") if x)
+        task = (f"goal orientations within {policy.goals.tolerance:g} rad" if policy.goals is not None else
+                f"goal {speed:+.1f} rad/s" + (f" about {a.axis}" if a.mode == "all-axes" else ""))
+        self.status.update(model=f"{label}   {task}", duration=a.duration, goal=speed, home=None, goals=None,
                            trail_id=self.status["trail_id"] + 1, record=None, record_on=True, running=False)
-        print(f"\n=== {label}: goal {speed:+.1f} rad/s, {a.duration:.0f} s")
+        print(f"\n=== {label}: {task}, {a.duration:.0f} s")
         hand = self.hand
+        hand.goal_log = run.goal_times
         try:
             self.park()
             hand.reset_health()
@@ -566,6 +656,8 @@ class Evaluation:
                         reason = "controller"
                     elif temps is not None and self.thermal.over_limit(temps) is not None:
                         reason = "heat"
+                    elif run.goals is not None and run.since_goal() > a.goal_timeout:
+                        reason = "no progress"
                     else:
                         reason = run.drop.check(now)  # "", "dropped" or "lost"
                     self.key()  # n and q raise
@@ -574,6 +666,10 @@ class Evaluation:
                 self.status.update(running=False)
                 run.segments.append((run.elapsed() - run.segment_start_elapsed, segment_temps, hand.temperatures()))
                 if reason == "time":
+                    break
+                if reason == "no progress":
+                    run.outcome = "no progress"
+                    print(f"  {run.elapsed():5.1f} s: no goal reached for {a.goal_timeout:.0f} s")
                     break
                 if reason == "controller":
                     raise RuntimeError("the hand controller stopped sending joint positions")
@@ -660,15 +756,23 @@ class Evaluation:
         self.tick()
         time.sleep(1.0)  # the camera process closes the video
         tilt, moved = self.camera_tilt()
-        rates = self.thermal.learn(run.segments) if run.outcome in ("completed", "too many drops") else None
+        learn = run.outcome in ("completed", "too many drops", "no progress")
+        rates = self.thermal.learn(run.segments) if learn else None
         row = run.write(self.hand, end_temps, rates, self.camera_info, tilt, moved)
         append_row(self.out / "results.csv", row)
-        if row["drops"]:
-            print(f"  before the first drop: {row['turns_before_first_drop']:+.2f} turns in "
-                  f"{row['duration_before_first_drop_s']} s (the result on W&B)")
-        print(f"  {row['outcome'].upper()}: {row['turns']:+.2f} turns in {row['active_s']} s "
-              f"({row['mean_speed_rad_s']:+.2f} rad/s, goal {row['goal_rad_s']:+.1f}), {row['drops']} drops, "
-              f"tracked {row['tracked_fraction']:.0%}, motors {row['temp_max_start_c']:.0f} -> {row['temp_max_end_c']:.0f} C")
+        if run.goals is not None:
+            print(f"  {row['outcome'].upper()}: {row['goals']} goals in {row['active_s']} s, "
+                  f"{row['goals_before_first_drop']} before the first drop, {row['drops']} drops, "
+                  f"tracked {row['tracked_fraction']:.0%}, motors {row['temp_max_start_c']:.0f} -> "
+                  f"{row['temp_max_end_c']:.0f} C")
+        else:
+            if row["drops"]:
+                print(f"  before the first drop: {row['turns_before_first_drop']:+.2f} turns in "
+                      f"{row['duration_before_first_drop_s']} s (the result on W&B)")
+            print(f"  {row['outcome'].upper()}: {row['turns']:+.2f} turns in {row['active_s']} s "
+                  f"({row['mean_speed_rad_s']:+.2f} rad/s, goal {row['goal_rad_s']:+.1f}), {row['drops']} drops, "
+                  f"tracked {row['tracked_fraction']:.0%}, motors {row['temp_max_start_c']:.0f} -> "
+                  f"{row['temp_max_end_c']:.0f} C")
         if row["cube_obs_tracked_fraction"] != "":
             print(f"  the policy had a cube pose at most {self.args.cube_pose_timeout} s old in "
                   f"{row['cube_obs_tracked_fraction']:.0%} of its steps (cube_obs.csv)")
@@ -680,6 +784,9 @@ class Evaluation:
         """The run to W&B in a background process (log: node_logs/wandb_upload.log), so the next run can start."""
         if self.args.mock:
             print("  not uploaded to W&B: a --mock run")
+            return
+        if self.args.mode == "goals":
+            print("  not uploaded to W&B: its leaderboard is for spinning; the goal runs are in results.csv")
             return
         if outcome not in wandb_results.UPLOADED_OUTCOMES:
             print(f"  not uploaded to W&B: {outcome}")
@@ -718,9 +825,15 @@ class Evaluation:
 class Run:
     """What one policy's run measures and writes."""
 
-    def __init__(self, name, policy_path, run_dir, args, joint_ids, observations, hand_T_camera=None):
+    def __init__(self, name, policy_path, run_dir, args, joint_ids, policy, hand_T_camera=None):
+        from cube_spin_policy import axis_in_camera
         self.name, self.policy_path, self.run_dir, self.args, self.joint_ids = name, Path(policy_path), run_dir, args, joint_ids
-        self.observations, self.hand_T_camera = observations, hand_T_camera
+        self.observations, self.cube_pose, self.hand_T_camera = policy.obs_dim, policy.use_cube_pose, hand_T_camera
+        self.goals = policy.goals    # the goal orientations (--mode goals), else None
+        self.goal_times = []         # policy time of every goal reached (HandLink appends)
+        # turns about the camera's viewing axis; with --mode all-axes about the commanded axis as the camera sees it
+        self.up = (axis_in_camera(hand_T_camera, args.axis) if args.mode == "all-axes" and hand_T_camera is not None
+                   else (0.0, 0.0, -1.0))
         self.outcome = ""
         self.started = False
         self.active = False
@@ -742,7 +855,7 @@ class Run:
         self.start_temps = temps
         self.speed = speed
         self.sign = 1.0 if speed >= 0 else -1.0
-        self.counter = TurnCounter()
+        self.counter = TurnCounter(up=self.up)
         self.drop = DropMonitor(self.home, self.args.drop_dist, self.args.drop_confirm, self.args.lost_timeout)
 
     def elapsed(self):
@@ -781,8 +894,23 @@ class Run:
         if not self.started:
             return {}
         elapsed = self.elapsed()
-        return dict(elapsed=elapsed, turns=self.sign * self.counter.turns, drops=self.drops,
-                    speed=self.sign * self.counter.speed(elapsed, 5.0))
+        out = dict(elapsed=elapsed, turns=self.sign * self.counter.turns, drops=self.drops,
+                   speed=self.sign * self.counter.speed(elapsed, 5.0))
+        if self.goals is not None:
+            error = self.goals.error
+            out.update(goals=len(self.goal_times), goals_before_drop=self.goals_before_first_drop(),
+                       goal_error_deg=None if error is None else float(np.degrees(error)))
+        return out
+
+    def since_goal(self):
+        """Policy seconds since the last goal reached (or since the start)."""
+        return self.elapsed() - (self.goal_times[-1] if self.goal_times else 0.0)
+
+    def goals_before_first_drop(self):
+        """The score of the goal task: the goals reached in a row, until the first drop."""
+        if not self.drop_times:
+            return len(self.goal_times)
+        return sum(t <= self.drop_times[0] for t in self.goal_times)
 
     def log_health(self, hand, state):
         now = time.time()
@@ -867,12 +995,23 @@ class Run:
         until = self.drop_times[0] if self.drop_times else active
         before_drop = self.sign * counter.angle_at(until) / (2 * np.pi) if self.drop_times else self.sign * counter.turns
         progress = progress_metrics([t for t, _ in curve if t <= until], [c for t, c in curve if t <= until], until)
+        goals = dict.fromkeys(("goals", "goals_before_first_drop", "first_goal_s", "s_per_goal"), "")
+        if self.goals is not None:
+            with open(d / "goals.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["goal", "policy_time_s"])
+                w.writerows([[i + 1, round(t, 2)] for i, t in enumerate(self.goal_times)])
+            goals = dict(goals=len(self.goal_times), goals_before_first_drop=self.goals_before_first_drop(),
+                         first_goal_s=round(self.goal_times[0], 1) if self.goal_times else "",
+                         s_per_goal=round(active / len(self.goal_times), 1) if self.goal_times else "")
 
         errors = "; ".join(f"{j}: {'+'.join(status_names(b))}" for j, b in zip(joints, status) if b)
         row = dict(
             time=datetime.fromtimestamp(self.t0).strftime("%Y-%m-%d %H:%M:%S"), model=self.name,
             policy_file=str(self.policy_path), policy_sha256=sha256(self.policy_path)[:12], git_commit=git_commit(),
-            observations=self.observations, goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
+            observations=self.observations, cube_pose=self.cube_pose, mode=a.mode or "",
+            axis=a.axis if a.mode == "all-axes" else "", action_alpha=a.action_alpha, **goals,
+            goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
             wall_s=round(time.time() - self.t0, 1),
             turns=round(self.sign * counter.turns, 2),
             mean_speed_rad_s=round(self.sign * counter.angle / active, 3) if active > 0 else 0.0,
@@ -977,7 +1116,20 @@ def parse_args(argv=None):
     p.add_argument("--speed", type=float, help="Commanded spin speed for every policy (rad/s; the sign is the "
                    "direction). Default: each model's goal speed on W&B (the speed of its runs there, e.g. 1.5 for "
                    f"ibex), else {wandb_results.DEFAULT_SPEED}. A run counts in the leaderboard only at that speed.")
-    p.add_argument("--duration", type=float, default=60.0, help="Seconds of policy time per run.")
+    p.add_argument("--duration", type=float, help="Seconds of policy time per run (default 60, with --mode goals 120).")
+    p.add_argument("--mode", choices=list(MODES), help="Run the policies that need this mode (see Special modes "
+                   "above): " + "; ".join(f"{m}: {what}" for m, what in MODES.items()) + ". Without --mode only "
+                   "the policies of the spin tasks run; --auto lists the others with the mode they need.")
+    p.add_argument("--axis", choices=("x", "y", "z"), default="z", help="With --mode all-axes: the axis of the "
+                   "commanded spin in the simulation's frame; the turns are counted about it (x and y need "
+                   "--calibration).")
+    p.add_argument("--action-alpha", type=float, default=0.2, help="Moving average of the action term (the task's "
+                   "alpha). A policy trained with another one (its .json from download_policies.py says so) runs only "
+                   "with that one.")
+    p.add_argument("--goal-tolerance", type=float, help="With --mode goals: a goal orientation counts as reached "
+                   "within this angle (rad; default 0.4, DeXtreme's test tolerance).")
+    p.add_argument("--goal-timeout", type=float, help="With --mode goals: end the run after this many seconds of "
+                   "policy time without a goal reached (default 80).")
     p.add_argument("--out", default=str(REPO / "logs/real_eval"), help="Results folder.")
     p.add_argument("--note", default="", help="Free text saved with every run (cube, setup, what changed).")
     p.add_argument("--start-wrist-deg", type=float, help="Wrist angle of the start pose (default: flexed, 2 deg "
@@ -1006,6 +1158,9 @@ def parse_args(argv=None):
                    "launch file's, measured for the ORCA v1b mount; measure them for your setup.")
     p.add_argument("--cube-pose-timeout", type=float, default=0.25, help="A policy with the cube pose gets an older "
                    "pose with the flag 0 (lost); = timeout_s of CUBE_TRACKER in faive_lab (s).")
+    p.add_argument("--twin", action=argparse.BooleanOptionalAction, default=None, help="A digital twin in RViz and "
+                   "in the video's top right corner: the hand model as measured and the cube as a policy with the "
+                   "cube pose sees it, in the simulation's frame. Default: on with --calibration.")
     p.add_argument("--detector", type=Path, default=DEFAULT_CKPT, help="Checkpoint of the cube detector.")
     p.add_argument("--device", default="auto", help="Detector device: auto (cuda, then mps, then cpu), cuda, mps, cpu.")
     p.add_argument("--no-window", action="store_true", help="No live window (then there are no keys either).")
@@ -1050,6 +1205,18 @@ def parse_args(argv=None):
             p.error(f"--calibration: {args.calibration} not found")
         if np.load(args.calibration).shape != (4, 4):
             p.error(f"--calibration: {args.calibration} is not a 4x4 cam_T_tag")
+    if args.twin is None:
+        args.twin = args.calibration is not None
+    if args.axis != "z" and args.mode != "all-axes":
+        p.error("--axis goes with --mode all-axes")
+    if args.axis != "z" and args.calibration is None and not args.mock:
+        p.error(f"--axis {args.axis}: counting the turns about it needs --calibration")
+    if (args.goal_tolerance is not None or args.goal_timeout is not None) and args.mode != "goals":
+        p.error("--goal-tolerance and --goal-timeout go with --mode goals")
+    if args.goal_timeout is None:
+        args.goal_timeout = 80.0
+    if args.duration is None:
+        args.duration = 120.0 if args.mode == "goals" else 60.0
     return args
 
 
@@ -1063,26 +1230,87 @@ def model_file(path, models_dir):
     return path
 
 
-def not_deployable(policy_path, calibrated):
-    """Why the evaluation cannot run a policy file ("" = it can): it feeds the observations of the proprioceptive task,
-    or of the extero task if calibrated (the camera's pose relative to the hand is known), and expects a target per
-    joint (cube_spin_policy.py). Teachers and history students on W&B take others."""
+def training_info(policy_path):
+    """The training info download_policies.py saved in the policy's .json ({} if there is none)."""
+    try:
+        return json.loads(Path(policy_path).with_suffix(".json").read_text()).get("training") or {}
+    except (OSError, ValueError):
+        return {}
+
+
+@functools.lru_cache(maxsize=None)
+def policy_needs(policy_path):
+    """What a policy file needs, from its observations (the layouts of cube_spin_policy.py) and its training info:
+    dict(mode=the --mode that runs it (None: none), what=why, cube_pose=whether it takes the cube pose, alpha=the
+    action alpha it was trained with (0.2 if not known, the tasks' default), error=why it cannot run at all)."""
     import torch
-    from cube_spin_policy import NUM_JOINTS, OBS_DIM, OBS_DIM_EXTERO, observation_size
+    from cube_spin_policy import LAYOUTS, NUM_JOINTS, input_size, is_recurrent
+    info = training_info(policy_path)
+    needs = dict(mode=None, what="", cube_pose=False, alpha=info.get("action_alpha") or 0.2, error="")
     try:
         policy = torch.jit.load(str(policy_path), map_location="cpu").eval()
-        size = observation_size(policy)
-        if size is None:
-            return f"takes neither the {OBS_DIM} proprioceptive observations nor the {OBS_DIM_EXTERO} with the cube pose"
-        if size == OBS_DIM_EXTERO and not calibrated:
-            return "takes the cube pose: give --calibration and --hand-to-tag"
+        size = input_size(policy)
+        if size not in LAYOUTS:
+            if "critic" in (info.get("actor_obs") or []):
+                needs["error"] = (f"a teacher: it takes the {size} privileged observations of the simulation (cube "
+                                  "velocities, physics parameters), which the hand does not have; no mode runs it")
+            else:
+                needs["error"] = (f"takes {size or 'other'} observations, none of the layouts of cube_spin_policy.py "
+                                  f"({', '.join(map(str, LAYOUTS))})")
+            return needs
         with torch.no_grad():
             out = policy(torch.zeros(1, size))
     except Exception as e:
-        return f"cannot be run ({type(e).__name__}: {e})"
+        needs["error"] = f"cannot be run ({type(e).__name__}: {e})"
+        return needs
     if out.shape[-1] != NUM_JOINTS:
-        return f"outputs {out.shape[-1]} actions, not {NUM_JOINTS}"
-    return ""
+        needs["error"] = f"outputs {out.shape[-1]} actions, not {NUM_JOINTS}"
+        return needs
+    layout = LAYOUTS[size]
+    needs["cube_pose"] = "cube_pose" in layout.terms
+    axes = ((info.get("commands") or {}).get("continuous_rotation") or {}).get("axis_probs") or [0, 0, 1]
+    if is_recurrent(policy):
+        needs.update(mode="student", what="a distilled student with an LSTM")
+    elif layout.history and set(layout.history) == set(layout.terms):
+        needs.update(mode="student", what=f"a distilled student with {max(layout.history.values())} steps of "
+                     "history of every observation")
+    elif layout.history:
+        needs.update(mode="history", what=f"{max(layout.history.values())} steps of history of "
+                     + " and ".join(layout.history))
+    elif "goal_orientation" in layout.terms:
+        needs.update(mode="goals", what="the goal task: turns the cube to random orientations")
+    elif any(axes[:2]):
+        needs.update(mode="all-axes", what="trained to spin about x, y and z")
+    return needs
+
+
+def run_setting(policy_path):
+    """The setting (--mode, action alpha) a policy file needs; only W&B runs with it count as tests of it."""
+    needs = policy_needs(policy_path)
+    return wandb_results.setting(needs["mode"], needs["alpha"])
+
+
+def not_deployable(policy_path, calibrated, mode=None, action_alpha=0.2):
+    """Why the evaluation cannot run a policy file with these arguments ("" = it can), with the arguments that would
+    run it ("try --mode student"). It builds the observations of the layouts in cube_spin_policy.py, those with the cube
+    pose only if calibrated (the camera's pose relative to the hand is known), and expects a target per joint."""
+    needs = policy_needs(policy_path)
+    if needs["error"]:
+        return needs["error"]
+    why, flags = [], []
+    if needs["mode"] is None and mode is not None:
+        why.append("a policy of the spin tasks")
+        flags.append(f"without --mode {mode}")
+    elif needs["mode"] != mode:
+        why.append(needs["what"])
+        flags.append(f"--mode {needs['mode']}")
+    if needs["cube_pose"] and not calibrated:
+        why.append("takes the cube pose")
+        flags.append("--calibration CAM_T_TAG.npy --hand-to-tag X Y Z ROLL PITCH YAW")
+    if abs(needs["alpha"] - action_alpha) > 1e-9:
+        why.append(f"trained with action alpha {needs['alpha']:g}")
+        flags.append(f"--action-alpha {needs['alpha']:g}")
+    return f"{'; '.join(why)}: try {' '.join(flags)}" if why else ""
 
 
 def _terminate(*_):
@@ -1104,12 +1332,13 @@ def untested_policies(args, known):
     if not any(Path(args.models_dir).glob("*_policy.pt")):
         raise SystemExit(f"No models (*_policy.pt) in {args.models_dir}. Download them from W&B first:\n"
                          "  python experiments/rl_inference/download_policies.py")
-    todo, done = wandb_results.split_models(args.models_dir, known)
+    todo, done = wandb_results.split_models(args.models_dir, known, setting_of=run_setting)
     print(f"Models in {args.models_dir} against W&B {args.wandb_entity}/{args.wandb_project}:")
     for path, why in done:
         print(f"  tested    {path.name:28s} {why}")
     calibrated = args.calibration is not None or args.mock
-    unusable = {path: why for path in todo if (why := not_deployable(path, calibrated))}
+    unusable = {path: why for path in todo
+                if (why := not_deployable(path, calibrated, args.mode, args.action_alpha))}
     for path in todo:
         print(f"  untested  {path.name:28s} {'not evaluated: ' + unusable[path] if path in unusable else ''}".rstrip())
     todo = [path for path in todo if path not in unusable]
@@ -1128,18 +1357,28 @@ def main(argv=None):
             return 1
         return 0
     known = {}
-    if args.auto or (args.policies and args.speed is None):
+    if args.auto or (args.policies and args.speed is None and args.mode != "goals"):
         known = wandb_results.known_models(wandb_records(args))
     if args.auto:
         args.policies = untested_policies(args, known)
     calibrated = args.calibration is not None or args.mock
-    unusable = [f"{p}: {why}" for p in args.policies if (why := not_deployable(p, calibrated))]
+    unusable = [f"{p}: {why}" for p in args.policies
+                if (why := not_deployable(p, calibrated, args.mode, args.action_alpha))]
     if unusable:
         raise SystemExit("Cannot evaluate:\n  " + "\n  ".join(unusable))
     speeds = {}
     for policy in args.policies:
+        if args.mode == "goals":
+            speeds[policy] = 0.0
+            print(f"  {wandb_results.model_name(policy)}: goal orientations")
+            continue
         speeds[policy], source = wandb_results.goal_speed(known, policy, args.speed)
-        print(f"  {wandb_results.model_name(policy)}: {speeds[policy]:+.1f} rad/s ({source})")
+        top = (((training_info(policy).get("commands") or {}).get("continuous_rotation") or {})
+               .get("angular_vel_range") or [None] * 3)["xyz".index(args.axis)]
+        if args.mode == "all-axes" and source.startswith("default") and top:
+            speeds[policy], source = float(top), f"the top of its training range about {args.axis}"
+        print(f"  {wandb_results.model_name(policy)}: {speeds[policy]:+.1f} rad/s"
+              f"{' about ' + args.axis if args.mode == 'all-axes' else ''} ({source})")
     if args.dry_run or (args.auto and not args.policies):
         return 0
     if args.auto:
@@ -1158,6 +1397,8 @@ def main(argv=None):
     try:
         if not args.pose_only:
             ev.start_vision()
+        if args.twin:
+            ev.start_twin()
         if args.camera_only:
             ev.show("camera only, the hand is not used", "white", "q = quit")
             while True:

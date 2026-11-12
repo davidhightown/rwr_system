@@ -391,12 +391,24 @@ def test_evaluation_takes_policies_with_the_cube_pose_only_with_a_calibration(tm
     assert ep.not_deployable(proprio, calibrated=False) == ""
     assert "--calibration" in ep.not_deployable(extero, calibrated=False)
     assert ep.not_deployable(extero, calibrated=True) == ""
-    assert "neither" in ep.not_deployable(linear_policy(tmp_path / "x.pt", 80), calibrated=True)
+    assert "none of the layouts" in ep.not_deployable(linear_policy(tmp_path / "x.pt", 80), calibrated=True)
     with pytest.raises(SystemExit):
         ep.parse_args(["--calibration", str(tmp_path / "missing.npy"), str(extero)])
     np.save(tmp_path / "cal.npy", np.eye(4))
     args = ep.parse_args(["--calibration", str(tmp_path / "cal.npy"), str(extero)])
     assert ep.camera_in_hand(args).shape == (4, 4)
+    assert args.twin  # the digital twin comes with the calibration
+    assert not ep.parse_args(["--calibration", str(tmp_path / "cal.npy"), "--no-twin", str(extero)]).twin
+    assert not ep.parse_args([str(proprio)]).twin and ep.parse_args(["--twin", str(proprio)]).twin
+
+
+def test_twin_panel_goes_into_the_top_right_corner():
+    from cube_eval.hud import picture_in_picture
+    frame, panel = np.zeros((540, 960, 3), np.uint8), np.full((380, 300, 3), 200, np.uint8)
+    picture_in_picture(frame, panel)
+    assert (frame[8:388, 652:952] == 200).all() and frame[:8].max() == 0 and frame[:, :652].max() == 0
+    picture_in_picture(small := np.zeros((200, 200, 3), np.uint8), panel)  # cut to fit a smaller frame
+    assert (small[8:192, 8:192] == 200).all()
 
 
 def test_mock_camera_sees_the_cube_where_the_task_commands_it():
@@ -406,3 +418,163 @@ def test_mock_camera_sees_the_cube_where_the_task_commands_it():
     hand_T_camera = ep.camera_in_hand(ep.parse_args(["--mock", "--pose-only"]))
     assert (OBS_T_HAND @ hand_T_camera @ [*MockCamera.HOME, 1.0])[:3] == pytest.approx([0, 0, -0.05], abs=1e-9)
     assert ep.camera_in_hand(ep.parse_args(["--pose-only"])) is None
+
+
+# -- the special modes (--mode)
+def recurrent_policy(path, inputs):
+    """As rsl_rl exports an LSTM: the memory in buffers that forward() updates."""
+    torch = pytest.importorskip("torch")
+
+    class Memory(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.register_buffer("hidden_state", torch.zeros(1, 1, 4))
+            self.register_buffer("cell_state", torch.zeros(1, 1, 4))
+            self.actor = torch.nn.Linear(inputs, 17)
+
+        def forward(self, x):
+            self.hidden_state.copy_(self.hidden_state + 1.0)
+            return self.actor(x) + self.hidden_state.sum()
+
+    torch.jit.script(Memory()).save(str(path))
+    return path
+
+
+def with_training(path, **training):
+    import json
+    path.with_suffix(".json").write_text(json.dumps(dict(training=training)))
+    return path
+
+
+def test_history_is_per_term_oldest_first_and_filled_by_the_first_value(tmp_path):
+    from cube_spin_policy import JOINT_LIMITS_USD_DEG, CubeSpinPolicy
+    policy = CubeSpinPolicy(linear_policy(tmp_path / "adr.pt", 210), list(JOINT_LIMITS_USD_DEG), use_cube_pose=None)
+    q, zero = (lambda v: np.full(17, v, dtype=np.float32)), np.zeros(17)
+    first = policy.step(q(0.1), zero)[1]
+    assert first.shape == (210,)
+    assert np.allclose(first[:85].reshape(5, 17), policy.normalize(q(0.1)))  # joint_pos: 5 times the first value
+    assert first[102:108] == pytest.approx([0, 0, -0.05, 0, 0, 1.0])  # goal_command: no history
+    second = policy.step(q(0.2), zero)[1]
+    positions = second[:85].reshape(5, 17)
+    assert np.allclose(positions[:4], policy.normalize(q(0.1))) and np.allclose(positions[4], policy.normalize(q(0.2)))
+    commands = second[125:].reshape(5, 17)  # last_joint_cmd: the newest is the command of the first step
+    assert np.allclose(commands[:4], q(0.1)) and not np.allclose(commands[4], q(0.1))
+    policy.reset()
+    assert np.allclose(policy.step(q(0.3), zero)[1][:85].reshape(5, 17), policy.normalize(q(0.3)))
+
+    student = CubeSpinPolicy(linear_policy(tmp_path / "s.pt", 740), list(JOINT_LIMITS_USD_DEG), use_cube_pose=None)
+    obs = student.step(q(0.1), zero)[1]
+    assert obs[340:400].reshape(10, 6) == pytest.approx(np.tile([0, 0, -0.05, 0, 0, 1.0], (10, 1)))
+
+
+def test_the_memory_of_a_recurrent_policy_is_cleared_at_every_reset(tmp_path):
+    from cube_spin_policy import JOINT_LIMITS_USD_DEG, CubeSpinPolicy
+    policy = CubeSpinPolicy(recurrent_policy(tmp_path / "m.pt", 74), list(JOINT_LIMITS_USD_DEG), use_cube_pose=None)
+    assert policy.recurrent
+    q = np.zeros(17)
+    first = policy.step(q, q)[2]
+    assert not np.allclose(policy.step(q, q)[2], first)
+    policy.reset()
+    assert np.allclose(policy.step(q, q)[2], first)  # also after the size probes when it was loaded
+
+
+def test_goal_orientations_follow_the_tracked_cube():
+    from cube_spin_policy import GoalOrientations, rotation_of, wxyz
+    goals = GoalOrientations(tolerance=0.4, seed=0)
+    goal = goals.quat.copy()
+    far = wxyz(rotation_of(goal) * Rotation.from_rotvec([0.0, 0.0, 1.0]))
+    obs = goals.observation(np.array([0, 0, -0.05, *far, 1.0]))
+    assert goals.reached == 0 and goals.error == pytest.approx(1.0) and np.allclose(obs[:4], goal)
+    expected = rotation_of(far) * rotation_of(goal).inv()  # tracked * conj(goal), as cube_pose_tracked_goal
+    assert obs[4] >= 0 and (rotation_of(obs[4:]) * expected.inv()).magnitude() == pytest.approx(0.0, abs=1e-5)
+    near = wxyz(rotation_of(goal) * Rotation.from_rotvec([0.0, 0.3, 0.0]))
+    goals.observation(np.array([0, 0, -0.05, *near, 0.0]))  # lost: does not count
+    assert goals.reached == 0
+    obs = goals.observation(np.array([0, 0, -0.05, *near, 1.0]))
+    assert goals.reached == 1 and not np.allclose(goals.quat, goal) and np.allclose(obs[:4], goals.quat)
+
+
+def test_goal_and_axis_layouts(tmp_path):
+    from cube_spin_policy import JOINT_LIMITS_USD_DEG, CubeSpinPolicy, axis_in_camera
+    import eval_policies as ep
+    joints, q = list(JOINT_LIMITS_USD_DEG), np.zeros(17)
+    goals = CubeSpinPolicy(linear_policy(tmp_path / "g.pt", 84), joints, use_cube_pose=None)
+    cube = np.array([0, 0, -0.05, 1, 0, 0, 0, 1], dtype=np.float32)
+    assert goals.goals is not None and goals.step(q, q) is None  # waits for the cube pose
+    obs = goals.step(q, q, cube)[1]
+    assert np.array_equal(obs[34:42], cube) and np.allclose(obs[42:46], goals.goals.quat)
+    axis = CubeSpinPolicy(linear_policy(tmp_path / "a.pt", 82), joints, use_cube_pose=None, goal_ang_vel=1.5, axis="x")
+    assert axis.goal_command == pytest.approx([0, 0, -0.05, 1.5, 0, 0])
+    axis.flip_direction()
+    assert axis.goal_command[3] == pytest.approx(-1.5)
+    mock = ep.camera_in_hand(ep.parse_args(["--mock", "--pose-only"]))  # looks down at the palm
+    assert axis_in_camera(mock, "z") == pytest.approx([0, 0, -1]) and axis_in_camera(mock, "x") == pytest.approx([1, 0, 0])
+
+
+def test_policies_that_need_a_mode_say_which_arguments_run_them(tmp_path):
+    import eval_policies as ep
+    student = linear_policy(tmp_path / "hist_policy.pt", 740)
+    lstm = recurrent_policy(tmp_path / "lstm_policy.pt", 74)
+    adr = linear_policy(tmp_path / "adr_policy.pt", 210)
+    goals = linear_policy(tmp_path / "goals_policy.pt", 84)
+    axes = with_training(linear_policy(tmp_path / "axes_policy.pt", 82),
+                         commands=dict(continuous_rotation=dict(axis_probs=[0.1, 0.1, 0.8])))
+    alpha = with_training(linear_policy(tmp_path / "alpha_policy.pt", 74), action_alpha=0.5)
+    teacher = with_training(linear_policy(tmp_path / "teacher_policy.pt", 218), actor_obs=["critic"])
+    assert ep.not_deployable(student, True) == ("a distilled student with 10 steps of history of every observation: "
+                                                "try --mode student")
+    assert ep.not_deployable(student, True, mode="student") == ""
+    assert ep.not_deployable(lstm, True).endswith("an LSTM: try --mode student")
+    assert ep.not_deployable(adr, True).endswith("try --mode history")
+    assert ep.not_deployable(goals, False).endswith("try --mode goals --calibration CAM_T_TAG.npy --hand-to-tag X Y Z "
+                                                    "ROLL PITCH YAW")
+    assert ep.not_deployable(goals, True, mode="goals") == ""
+    assert ep.not_deployable(axes, True).endswith("try --mode all-axes")
+    assert ep.not_deployable(alpha, False).endswith("try --action-alpha 0.5")
+    assert ep.not_deployable(alpha, False, action_alpha=0.5) == ""
+    assert ep.not_deployable(alpha, False, mode="student", action_alpha=0.5).endswith("try without --mode student")
+    assert ep.not_deployable(alpha, False, mode="student").endswith("try without --mode student --action-alpha 0.5")
+    assert ep.not_deployable(teacher, True).startswith("a teacher: it takes the 218 privileged observations")
+    assert ep.run_setting(alpha) == ("", 0.5) and ep.run_setting(lstm) == ("student", 0.2)
+
+
+def test_mode_arguments(tmp_path):
+    import eval_policies as ep
+    policy = linear_policy(tmp_path / "p_policy.pt", 74)
+    assert ep.parse_args([str(policy)]).duration == 60.0
+    assert ep.parse_args(["--mode", "goals", str(policy)]).duration == 120.0
+    for wrong in (["--axis", "x"], ["--mode", "all-axes", "--axis", "y"], ["--goal-timeout", "30"]):
+        with pytest.raises(SystemExit):
+            ep.parse_args([*wrong, str(policy)])
+    np.save(tmp_path / "cal.npy", np.eye(4))
+    assert ep.parse_args(["--mode", "all-axes", "--axis", "x", "--calibration", str(tmp_path / "cal.npy"),
+                          str(policy)]).axis == "x"
+
+
+def test_a_run_counts_as_a_test_only_with_the_setting_the_model_needs(tmp_path):
+    for name in ("lstm", "paca"):
+        (tmp_path / f"{name}_policy.pt").write_bytes(name.encode())
+    old = [record("lstm", "lstm"), record("paca", "paca")]  # before --mode and --action-alpha: ("", 0.2)
+    known = wr.known_models(old)
+    assert wr.tested_because(known, "lstm", "", wr.setting()) != ""
+    assert wr.tested_because(known, "lstm", "", wr.setting("student")) == ""
+    settings = {"lstm_policy.pt": wr.setting("student"), "paca_policy.pt": wr.setting("", 0.5)}
+    todo, _ = wr.split_models(tmp_path, known, setting_of=lambda p: settings[p.name])
+    assert [p.name for p in todo] == ["lstm_policy.pt", "paca_policy.pt"]
+    new = record("lstm", "lstm")
+    new["config"]["eval"].update(mode="student", action_alpha=0.2)
+    todo, _ = wr.split_models(tmp_path, wr.known_models(old + [new]), setting_of=lambda p: settings[p.name])
+    assert [p.name for p in todo] == ["paca_policy.pt"]
+
+
+def test_mode_in_the_wandb_config_and_the_leaderboard(tmp_path):
+    meta = dict(meta_of(model="lemur"), observations=82, cube_pose=True, mode="all-axes", axis="x", action_alpha=0.2)
+    e = wr.config_of(meta, tmp_path / "s" / "r", {})["eval"]
+    assert (e["mode"], e["axis"], e["cube_pose"], e["action_alpha"]) == ("all-axes", "x", True, 0.2)
+    student = wr.config_of(dict(meta_of(model="hist"), observations=740, cube_pose=False), tmp_path / "s" / "r", {})
+    assert student["eval"]["cube_pose"] is False and student["eval"]["mode"] == ""
+    about_x = record("lemur", "lemur", turns=3.0)
+    about_x["config"]["eval"].update(mode="all-axes", axis="x")
+    about_z = record("lemur", "lemur", turns=5.0)
+    about_z["config"]["eval"].update(mode="all-axes", axis="z")
+    assert [r["each_run"] for r in wr.leaderboard_rows([about_x, about_z])] == ["5.0"]

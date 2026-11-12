@@ -21,9 +21,10 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .hud import project, render
+from .hud import picture_in_picture, project, render
 
 WINDOW = "cube spin evaluation"
+TWIN_MAX_AGE_S = 1.0  # an older twin panel is left out rather than shown frozen
 
 
 class OakCamera:
@@ -178,20 +179,20 @@ class Recorder:
         self._thread.join(timeout=10)
 
 
-def run(config, status_q, events_q, stop):
+def run(config, status_q, events_q, stop, twin_q=None):
     """The process: config is a dict (mock, mock_drop_after, exposure_us, iso, camera_id, detector_ckpt, device,
-    cube_edge, window, trail_s)."""
+    cube_edge, window, trail_s). twin_q: (time, BGR panel) of the digital twin (twin_render), pasted into the frame."""
     # Ctrl+C in the terminal also reaches this process: ignore it, so that the video is closed properly when the
     # main process asks this one to stop
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        _run(config, status_q, events_q, stop)
+        _run(config, status_q, events_q, stop, twin_q)
     except Exception as e:  # the main process decides what to do
         import traceback
         events_q.put(("error", f"{type(e).__name__}: {e}\n{traceback.format_exc()}"))
 
 
-def _run(config, status_q, events_q, stop):
+def _run(config, status_q, events_q, stop, twin_q=None):
     if config.get("mock"):
         camera = MockCamera(drop_after=config.get("mock_drop_after"))
         detector = camera
@@ -237,6 +238,7 @@ def _run(config, status_q, events_q, stop):
         cv2.resizeWindow(WINDOW, 960, 540)
     status, recorder, record_path, trail_id = {}, None, None, None
     last_imu = 0.0
+    twin_time, twin_panel = 0.0, None
     while not stop.is_set():
         try:
             while True:
@@ -265,6 +267,14 @@ def _run(config, status_q, events_q, stop):
             hz = sum(1 for t in detection_times if now - t <= 2.0) / 2.0
         frame = render(image, status, detection, pixels, K, dist, config.get("cube_edge", 0.045),
                        None if detection_time is None else now - detection_time, hz)
+        if twin_q is not None:
+            try:
+                while True:
+                    twin_time, twin_panel = twin_q.get_nowait()
+            except queue.Empty:
+                pass
+            if twin_panel is not None and now - twin_time < TWIN_MAX_AGE_S:
+                picture_in_picture(frame, twin_panel)
 
         path = status.get("record")
         if path != record_path:
