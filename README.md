@@ -208,6 +208,31 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
 - **Cold start:** the leaderboard also takes only runs that started with the hottest motor at most 42.5 °C, so a run starts only below that.
 - Left as they are: the start pose (wrist 33° here, 30° there), the camera exposure (5 ms here, automatic there), the heat rule (pause at 65 °C here, stop at 58 °C there) and the turn counting.
 
+#### Policies with the cube pose
+
+The same script runs the policies of the extero task (`orca-v2-inhand-repose-extero-v0`, 82 observations: the 74 proprioceptive ones and the cube pose). It tells them apart by their input size. They need the camera's pose relative to the hand; without `--calibration` the script sets them aside. Details: [experiments/README.md](experiments/README.md#calibrate-the-camera).
+
+1. **Calibrate the camera** against an AprilTag (`tag36h11`), and again whenever the camera or the tag moves. Start the camera, then in a second terminal, from the `experiments` folder, run the calibration with your tag's ID and the size of its black square (m). Hold the camera and tag still for about 3 s. Stop the launch afterwards: the evaluation starts its own camera.
+   ```bash
+      ros2 launch experiments cube_spin_v2.launch.py
+      python3 rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.075 --output ~/camera_extrinsics.npy --visualize
+   ```
+2. **Measure the tag's pose from the mount** (the centre of the forearm's flat bottom face): `X Y Z` in metres and `ROLL PITCH YAW` in degrees, along the mount's axes (x from the index finger towards the little finger, y out of the palm, z up the forearm). These are the `hand_to_tag_*` arguments of `cube_spin_v2.launch.py`, see [Set the hand's position](experiments/README.md#set-the-hands-position). The default (`0 0.05 0.055 90 0 180`) was measured for the ORCA v1b mount, so measure your own.
+3. **Check the cube pose.** With the cube in the palm, the printed position is a few cm from (0, 0, -0.05), +z up. If not, fix the calibration or the tag's pose first:
+   ```bash
+      python experiments/rl_inference/eval_policies.py --camera-only \
+          --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+   ```
+4. **Evaluate.** Without model names, the script lists the models in `models_extero/` with no run on W&B yet, and evaluates and uploads them after Enter (`--dry-run`: only the list). Named models are looked up in `models_extero/` and uploaded only with `--wandb`:
+   ```bash
+      python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+          --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+      python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+          --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW --wandb <name>
+   ```
+
+      The run itself works as above (start pose, drops, keys). Each run also writes `cube_obs.csv` (what the policy saw at each step), and `results.csv` gets `cube_obs_tracked_fraction`: the share of policy steps with a cube pose at most `--cube-pose-timeout` (0.25 s) old.
+
 ## Imitation learning
 
 The hand follows the Rokoko glove through the retargeter, and the Franka arm follows the glove's wrist. The Franka arm controller is not part of this repository: it subscribes to `/right/arm/end_effector_pose_cmd` and publishes `/right/arm/end_effector_pose`.
