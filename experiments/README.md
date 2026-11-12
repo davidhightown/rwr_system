@@ -29,7 +29,13 @@ The joint limits, observation order and scales in the script must match the faiv
 
 ### Evaluate policies on the real hand
 
-`rl_inference/eval_policies.py` runs exported policies one after another on the real hand and counts the cube's turns with the camera. It is for policies without the cube pose (task `orca-v2-inhand-repose-v0`, 74 observations). One command starts the hand controller, the camera and the live window. It works on Linux and macOS, and it needs no camera calibration.
+`rl_inference/eval_policies.py` runs exported policies one after another on the real hand and counts the cube's turns with the camera. It takes policies without the cube pose (task `orca-v2-inhand-repose-v0`, 74 observations) and, with a camera calibration, policies with it (task `orca-v2-inhand-repose-extero-v0`, 82 observations); it tells them apart by their input size. One command starts the hand controller, the camera and the live window. It works on Linux and macOS.
+
+For policies with the cube pose, the script needs the camera's pose relative to the hand: `--calibration` (the `cam_T_tag` file from `apriltag_calibration.py`, made with the camera where it is now) and `--hand-to-tag X Y Z ROLL PITCH YAW` (the `hand_to_tag_*` values of `cube_spin_v2.launch.py`). Check them with `--camera-only --calibration ...`: with the cube in the palm, the printed position is a few cm from (0, 0, -0.05), +z up. Such runs also write `cube_obs.csv`, and `results.csv` gets `cube_obs_tracked_fraction`, the share of policy steps with a cube pose at most `--cube-pose-timeout` (0.25 s) old.
+```bash
+python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+    --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+```
 
 **Before the first use**
 - The ROS workspace is built and sourced, and the hand is calibrated.

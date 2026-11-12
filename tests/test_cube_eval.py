@@ -301,15 +301,108 @@ def test_curves_over_policy_time(tmp_path):
     assert points[0]["curve/total_current_a"] == pytest.approx(0.3) and "curve/total_current_a" not in points[1]
 
 
-def test_auto_arguments():
+def test_auto_arguments(tmp_path):
     import eval_policies as ep
+    crow = tmp_path / "crow_policy.pt"
+    crow.write_bytes(b"crow")
     args = ep.parse_args(["--auto", "--dry-run"])
     assert args.wandb and args.policies == [] and args.models_dir == ROOT / "models_proprio"
     args = ep.parse_args([])  # no policy files: the untested models
     assert args.auto and args.wandb
-    args = ep.parse_args(["--models-dir", str(ROOT / "models"), "crow", "crow_policy.pt"])
-    assert args.policies == [ROOT / "models/crow_policy.pt"] * 2 and not args.auto
+    args = ep.parse_args(["--models-dir", str(tmp_path), "crow", "crow_policy.pt"])
+    assert args.policies == [crow] * 2 and not args.auto
     with pytest.raises(SystemExit):
-        ep.parse_args(["--auto", str(ROOT / "models/crow_policy.pt")])
+        ep.parse_args(["--auto", str(crow)])
     with pytest.raises(SystemExit):
-        ep.parse_args(["--dry-run", str(ROOT / "models/crow_policy.pt")])
+        ep.parse_args(["--dry-run", str(crow)])
+
+
+# -- policies with the cube pose (task orca-v2-inhand-repose-extero-v0)
+def pose(position, rotation=Rotation.identity()):
+    T = np.eye(4)
+    T[:3, :3], T[:3, 3] = rotation.as_matrix(), position
+    return T
+
+
+def linear_policy(path, inputs):
+    torch = pytest.importorskip("torch")
+    torch.jit.script(torch.nn.Linear(inputs, 17)).save(str(path))
+    return path
+
+
+def test_cube_pose_is_held_with_the_flag_0_when_lost():
+    from cube_spin_policy import OBS_T_HAND, CubePose
+    cube = CubePose(timeout_s=0.25)
+    assert cube.observation(0.0) is None
+    cube.update(10.0, np.linalg.inv(OBS_T_HAND) @ pose([0.01, 0.0, -0.05]))
+    obs = cube.observation(10.1)
+    assert obs == pytest.approx([0.01, 0.0, -0.05, 1, 0, 0, 0, 1], abs=1e-5)
+    assert cube.observation(10.3) == pytest.approx([*obs[:7], 0], abs=1e-6)
+    cube.update(9.0, np.eye(4))  # an older pose does not replace a newer one
+    assert cube.observation(10.1) == pytest.approx(obs, abs=1e-6)
+
+
+def test_cube_quaternion_keeps_its_sign_through_half_a_turn():
+    from cube_spin_policy import OBS_T_HAND, CubePose
+    cube, last = CubePose(), None
+    for deg in range(0, 361, 10):
+        cube.update(deg, np.linalg.inv(OBS_T_HAND) @ pose([0, 0, -0.05], Rotation.from_euler("z", deg, degrees=True)))
+        w, x, y, z = cube.quat
+        assert Rotation.from_quat([x, y, z, w]).magnitude() == pytest.approx(np.radians(min(deg, 360 - deg)), abs=1e-4)
+        if last is not None:
+            assert np.dot(cube.quat, last) > 0
+        last = cube.quat.copy()
+    assert cube.quat[0] < 0  # a full turn: -q, as the simulation's continuous quaternion
+
+
+def test_camera_pose_as_the_launch_file_builds_tf():
+    """cube_spin_v2.launch.py publishes tag -> hand_root (inverse of the measured hand_T_tag, moved by the mount) and
+    tag -> camera (inverse of cam_T_tag); TF then gives hand_root -> camera."""
+    from cube_spin_policy import hand_T_camera
+    cam_T_tag = pose([0.03, -0.02, 0.41], Rotation.from_euler("xyz", [170, 5, -30], degrees=True))
+    measured = [0.01, 0.05, 0.055, 90.0, 0.0, 180.0]
+    t = np.array(measured[:3]) + [-0.01, 0.0, -0.058]
+    rot_inv = Rotation.from_euler("XYZ", measured[3:], degrees=True).inv()
+    tag_T_hand = pose(-rot_inv.apply(t), rot_inv)
+    expected = np.linalg.inv(tag_T_hand) @ np.linalg.inv(cam_T_tag)
+    assert hand_T_camera(cam_T_tag, measured) == pytest.approx(expected, abs=1e-12)
+
+
+def test_policy_with_the_cube_pose_waits_for_it_and_gets_it_after_the_joint_velocities(tmp_path):
+    from cube_spin_policy import JOINT_LIMITS_USD_DEG, CubeSpinPolicy
+    joints = list(reversed(JOINT_LIMITS_USD_DEG))  # another order than the policy's
+    policy = CubeSpinPolicy(linear_policy(tmp_path / "e.pt", 82), joints, use_cube_pose=None)
+    assert policy.use_cube_pose and policy.obs_dim == 82
+    q, qd = np.zeros(17), np.zeros(17)
+    assert policy.step(q, qd) is None and policy.last_joint_cmd_usd is None  # no cube pose yet: nothing happens
+    cube = np.arange(8, dtype=np.float32)
+    _, obs, _, _ = policy.step(q, qd, cube)
+    assert obs.shape == (82,) and np.array_equal(obs[34:42], cube)
+    assert obs[42:48] == pytest.approx([0, 0, -0.05, 0, 0, 1.0])
+    proprio = CubeSpinPolicy(linear_policy(tmp_path / "p.pt", 74), joints, use_cube_pose=None)
+    assert not proprio.use_cube_pose and proprio.step(q, qd, cube)[1].shape == (74,)
+    with pytest.raises(ValueError):
+        CubeSpinPolicy(tmp_path / "e.pt", joints)  # the ROS node's default: without the cube pose
+
+
+def test_evaluation_takes_policies_with_the_cube_pose_only_with_a_calibration(tmp_path):
+    import eval_policies as ep
+    extero, proprio = linear_policy(tmp_path / "e.pt", 82), linear_policy(tmp_path / "p.pt", 74)
+    assert ep.not_deployable(proprio, calibrated=False) == ""
+    assert "--calibration" in ep.not_deployable(extero, calibrated=False)
+    assert ep.not_deployable(extero, calibrated=True) == ""
+    assert "neither" in ep.not_deployable(linear_policy(tmp_path / "x.pt", 80), calibrated=True)
+    with pytest.raises(SystemExit):
+        ep.parse_args(["--calibration", str(tmp_path / "missing.npy"), str(extero)])
+    np.save(tmp_path / "cal.npy", np.eye(4))
+    args = ep.parse_args(["--calibration", str(tmp_path / "cal.npy"), str(extero)])
+    assert ep.camera_in_hand(args).shape == (4, 4)
+
+
+def test_mock_camera_sees_the_cube_where_the_task_commands_it():
+    import eval_policies as ep
+    from cube_eval.vision import MockCamera
+    from cube_spin_policy import OBS_T_HAND
+    hand_T_camera = ep.camera_in_hand(ep.parse_args(["--mock", "--pose-only"]))
+    assert (OBS_T_HAND @ hand_T_camera @ [*MockCamera.HOME, 1.0])[:3] == pytest.approx([0, 0, -0.05], abs=1e-9)
+    assert ep.camera_in_hand(ep.parse_args(["--pose-only"])) is None

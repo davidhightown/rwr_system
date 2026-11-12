@@ -11,9 +11,11 @@
     python experiments/rl_inference/eval_policies.py --wandb models/ibex_policy.pt   # and upload the run to W&B
     python experiments/rl_inference/eval_policies.py --dry-run          # only the list of untested models
     python experiments/rl_inference/eval_policies.py --upload logs/real_eval/<run folder>   # upload a saved run
+    python experiments/rl_inference/eval_policies.py --models-dir models_extero --calibration ~/camera_extrinsics.npy \
+        --hand-to-tag X Y Z ROLL PITCH YAW                              # policies with the cube pose
 
 The script starts the hand controller (ROS) and a camera process, then for each policy (TorchScript files of the
-proprioceptive task, 74 observations):
+proprioceptive task, 74 observations, or of the extero task with the cube pose, 82 observations, see below):
 
 1. moves the hand to the start pose (the neutral pose with the wrist flexed) and switches the torque off,
 2. waits until the cube lies still in the palm and the motors are cool enough to finish the run below --temp-limit
@@ -40,6 +42,14 @@ real-hand evaluation (cube_eval/wandb_results.py), in a background process while
 
 Without policy files (= --auto) the script lists the models in --models-dir (default models_proprio/, filled by
 download_policies.py) that have no run on W&B yet, and evaluates and uploads them after Enter.
+
+Policies with the cube pose (task orca-v2-inhand-repose-extero-v0) get the camera's cube pose in the frame of the
+simulation, as policy_inference_cube_spin_v2.py on feat/exteroception-deployment gives it (cube_spin_policy.CubePose):
+the newest pose with the flag 1, or the last one with the flag 0 when it is older than --cube-pose-timeout. For that the
+script needs the camera's pose relative to the hand: --calibration (cam_T_tag from apriltag_calibration.py, made with the
+camera where it is now) and --hand-to-tag (the hand_to_tag_* arguments of cube_spin_v2.launch.py). --camera-only with
+--calibration prints the cube's position in the frame of the simulation: with the cube in the palm it is a few cm from
+(0, 0, -0.05), +z up. Such runs also write cube_obs.csv (what the policy saw at each step).
 
 Works on Linux and macOS. The cube detector uses CUDA, Apple's GPU or the CPU, whichever is there.
 """
@@ -95,8 +105,9 @@ class Skip(Exception):
 class HandLink:
     """The ROS side: the hand controller's topics and torque service, and the policy loop at 20 Hz."""
 
-    def __init__(self, joint_ids):
+    def __init__(self, joint_ids, cube_pose_timeout):
         import rclpy
+        from cube_spin_policy import CubePose
         from rclpy.callback_groups import ReentrantCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.node import Node
@@ -116,6 +127,8 @@ class HandLink:
         self.last_command = None
         self.clock = None       # callable: the run's policy time, for the joint log
         self.joint_log = []     # (policy time, command, measured, current) while the policy runs
+        self.cube = CubePose(cube_pose_timeout)  # the cube pose for policies of the extero task
+        self.cube_log = []      # (policy time, cube pose observation) while such a policy runs
         self.torque_on = None
 
         self.node = Node("cube_spin_evaluation")
@@ -167,9 +180,12 @@ class HandLink:
         with self.lock:
             if not self.policy_on or self.q is None or self.qd is None:
                 return
-            out = self.policy.step(self.q, self.qd)
+            cube = self.cube.observation(time.time()) if self.policy.use_cube_pose else None
+            out = self.policy.step(self.q, self.qd, cube)
             if out is None:
                 return
+            if cube is not None and self.clock is not None:
+                self.cube_log.append((self.clock(), cube))
             self.last_command = np.asarray(out[0], dtype=np.float64)
             command = self.last_command
         self._publish(command)
@@ -187,6 +203,10 @@ class HandLink:
             if self.temps is None or time.time() - self.temps_time > max_age:
                 return None
             return self.temps.copy()
+
+    def cube_detection(self, stamp, hand_T_cube):
+        with self.lock:
+            self.cube.update(stamp, hand_T_cube)
 
     def reset_health(self):
         with self.lock:
@@ -252,6 +272,8 @@ class Evaluation:
         args.start_wrist_deg = wrist  # so that meta.json has the angle that was used
         self.out = Path(args.out)
         self.thermal = ThermalModel(self.joint_ids, args.temp_limit, args.temp_margin, self.out / "thermal_history.json")
+        self.hand_T_camera = camera_in_hand(args)  # None: no policies with the cube pose
+        self.last_cube_print = 0.0
 
         self.hand = None
         self.hand_process = None
@@ -298,7 +320,7 @@ class Evaluation:
         import rclpy
         from rclpy.signals import SignalHandlerOptions
         rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl+C must reach our own clean-up
-        self.hand = HandLink(self.joint_ids)
+        self.hand = HandLink(self.joint_ids, self.args.cube_pose_timeout)
         a = self.args
         if not a.no_hand_launch:
             log_dir = self.out / "node_logs"
@@ -376,6 +398,8 @@ class Evaluation:
                 position, rotation = np.array(position), Rotation.from_quat(quat)
                 self.pose = (stamp, position, rotation)
                 self.rest.add(stamp, position)
+                if self.hand is not None and self.hand_T_camera is not None:
+                    self.hand.cube_detection(stamp, self.hand_T_camera @ transform(position, rotation))
                 if self.run is not None:
                     self.run.detection(stamp, position, rotation, pixel)
             elif kind == "key":
@@ -432,6 +456,18 @@ class Evaluation:
         tilt = np.degrees(np.arccos(np.clip(abs(mean[2]), 0, 1)))
         moved = np.degrees(np.arccos(np.clip(g @ np.median(g[:5], axis=0) / np.linalg.norm(np.median(g[:5], axis=0)), -1, 1)))
         return float(tilt), float(np.max(moved))
+
+    def print_cube_pose(self):
+        """--camera-only with --calibration: once per second, the cube pose as a policy with the cube pose gets it."""
+        from cube_spin_policy import CubePose
+        now = time.time()
+        if self.hand_T_camera is None or self.pose_age() > 0.5 or now - self.last_cube_print < 1.0:
+            return
+        self.last_cube_print = now
+        cube = CubePose()
+        cube.update(self.pose[0], self.hand_T_camera @ transform(self.pose[1], self.pose[2]))
+        print(f"  cube in the frame of the simulation: pos {np.round(cube.pos, 3)} m, quat (w, x, y, z) "
+              f"{np.round(cube.quat, 2)}")
 
     # -- the hand between runs
     def park(self):
@@ -495,13 +531,14 @@ class Evaluation:
         from cube_spin_policy import CubeSpinPolicy
         a = self.args
         name = policy_path.stem.removesuffix("_policy")
-        policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed)
+        policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed, use_cube_pose=None)
         run_dir = self.out / f"{datetime.now():%Y%m%d_%H%M%S}_{name}"
         run_dir.mkdir(parents=True)
-        run = Run(name, policy_path, run_dir, a, self.joint_ids)
-        self.status.update(model=f"{name}   goal {speed:+.1f} rad/s", duration=a.duration, goal=speed, home=None,
+        run = Run(name, policy_path, run_dir, a, self.joint_ids, policy.obs_dim, self.hand_T_camera)
+        label = f"{name}{' (cube pose)' if policy.use_cube_pose else ''}"
+        self.status.update(model=f"{label}   goal {speed:+.1f} rad/s", duration=a.duration, goal=speed, home=None,
                            trail_id=self.status["trail_id"] + 1, record=None, record_on=True, running=False)
-        print(f"\n=== {name}: goal {speed:+.1f} rad/s, {a.duration:.0f} s")
+        print(f"\n=== {label}: goal {speed:+.1f} rad/s, {a.duration:.0f} s")
         hand = self.hand
         try:
             self.park()
@@ -632,6 +669,9 @@ class Evaluation:
         print(f"  {row['outcome'].upper()}: {row['turns']:+.2f} turns in {row['active_s']} s "
               f"({row['mean_speed_rad_s']:+.2f} rad/s, goal {row['goal_rad_s']:+.1f}), {row['drops']} drops, "
               f"tracked {row['tracked_fraction']:.0%}, motors {row['temp_max_start_c']:.0f} -> {row['temp_max_end_c']:.0f} C")
+        if row["cube_obs_tracked_fraction"] != "":
+            print(f"  the policy had a cube pose at most {self.args.cube_pose_timeout} s old in "
+                  f"{row['cube_obs_tracked_fraction']:.0%} of its steps (cube_obs.csv)")
         print(f"  files in {run.run_dir}")
         if self.args.wandb:
             self.upload(run.run_dir, row["outcome"])
@@ -678,8 +718,9 @@ class Evaluation:
 class Run:
     """What one policy's run measures and writes."""
 
-    def __init__(self, name, policy_path, run_dir, args, joint_ids):
+    def __init__(self, name, policy_path, run_dir, args, joint_ids, observations, hand_T_camera=None):
         self.name, self.policy_path, self.run_dir, self.args, self.joint_ids = name, Path(policy_path), run_dir, args, joint_ids
+        self.observations, self.hand_T_camera = observations, hand_T_camera
         self.outcome = ""
         self.started = False
         self.active = False
@@ -772,7 +813,15 @@ class Run:
         with hand.lock:
             log = list(hand.joint_log)
             hand.joint_log = []
+            cube_log = list(hand.cube_log)
+            hand.cube_log = []
             status = hand.status_or.copy()
+        if cube_log:
+            with open(d / "cube_obs.csv", "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["policy_time_s", "x_m", "y_m", "z_m", "qw", "qx", "qy", "qz", "tracked"])
+                w.writerows([[f"{t:.3f}", *np.round(cube[:7], 4), int(cube[7])] for t, cube in cube_log])
+        cube_obs_tracked = round(float(np.mean([cube[7] for _, cube in cube_log])), 3) if cube_log else ""
         tracking = []
         if log:
             times = np.array([r[0] for r in log])
@@ -823,7 +872,7 @@ class Run:
         row = dict(
             time=datetime.fromtimestamp(self.t0).strftime("%Y-%m-%d %H:%M:%S"), model=self.name,
             policy_file=str(self.policy_path), policy_sha256=sha256(self.policy_path)[:12], git_commit=git_commit(),
-            goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
+            observations=self.observations, goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
             wall_s=round(time.time() - self.t0, 1),
             turns=round(self.sign * counter.turns, 2),
             mean_speed_rad_s=round(self.sign * counter.angle / active, 3) if active > 0 else 0.0,
@@ -832,7 +881,7 @@ class Run:
             drops=self.drops, first_drop_s=self.drop_times[0] if self.drop_times else "",
             pause_drop_s=round(self.pause_drop_s, 1), heat_pauses=self.heat_pauses,
             pause_heat_s=round(self.pause_heat_s, 1),
-            tracked_fraction=round(max(0.0, tracked), 3),
+            tracked_fraction=round(max(0.0, tracked), 3), cube_obs_tracked_fraction=cube_obs_tracked,
             detections_per_s=round(len(self.detection_elapsed) / active, 1) if active > 0 else 0.0,
             rejected_share=round(counter.rejected_share, 3), longest_gap_s=round(float(np.max(gaps)), 2),
             gap_s=round(counter.gap_s, 1),
@@ -855,9 +904,30 @@ class Run:
                     start_temps_c=dict(zip(joints, np.round(start, 1).tolist())),
                     end_temps_c=dict(zip(joints, np.round(end, 1).tolist())),
                     heating_c_per_s=None if rates is None else dict(zip(joints, np.round(rates, 4).tolist())),
+                    hand_T_camera=None if self.hand_T_camera is None else np.round(self.hand_T_camera, 5).tolist(),
                     camera=camera_info, options={k: str(v) for k, v in vars(a).items()})
         (d / "meta.json").write_text(json.dumps(meta, indent=1, default=str))
         return row
+
+
+def transform(position, rotation):
+    """4x4 from a position and a scipy Rotation."""
+    T = np.eye(4)
+    T[:3, :3], T[:3, 3] = rotation.as_matrix(), position
+    return T
+
+
+def camera_in_hand(args):
+    """hand_T_camera (4x4) for policies with the cube pose, or None without --calibration. With --mock: a camera that
+    looks down at the palm and sees the drawn cube resting where the task commands it, (0, 0, -0.05)."""
+    from cube_spin_policy import OBS_T_HAND, hand_T_camera
+    if args.calibration is not None:
+        return hand_T_camera(np.load(args.calibration), args.hand_to_tag)
+    if args.mock:
+        obs_T_camera = np.diag([1.0, -1.0, -1.0, 1.0])
+        obs_T_camera[:3, 3] = np.array([0.0, 0.0, -0.05]) - obs_T_camera[:3, :3] @ vision.MockCamera.HOME
+        return np.linalg.inv(OBS_T_HAND) @ obs_T_camera
+    return None
 
 
 def sha256(path):
@@ -927,6 +997,15 @@ def parse_args(argv=None):
                    "turning cube).")
     p.add_argument("--iso", type=int, default=400, help="Camera sensitivity with a fixed exposure (100-1600).")
     p.add_argument("--camera-id", default="", help="OAK ID to use; default: the first one found.")
+    p.add_argument("--calibration", type=Path, help="For policies with the cube pose: the camera calibration cam_T_tag "
+                   "(.npy from apriltag_calibration.py), made with the camera where it is now. Policies without the "
+                   "cube pose do not need it.")
+    p.add_argument("--hand-to-tag", type=float, nargs=6, default=[0.0, 0.05, 0.055, 90.0, 0.0, 180.0],
+                   metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"), help="With --calibration: the tag's pose measured "
+                   "from the mount (m, deg), the hand_to_tag_* arguments of cube_spin_v2.launch.py. Default: the "
+                   "launch file's, measured for the ORCA v1b mount; measure them for your setup.")
+    p.add_argument("--cube-pose-timeout", type=float, default=0.25, help="A policy with the cube pose gets an older "
+                   "pose with the flag 0 (lost); = timeout_s of CUBE_TRACKER in faive_lab (s).")
     p.add_argument("--detector", type=Path, default=DEFAULT_CKPT, help="Checkpoint of the cube detector.")
     p.add_argument("--device", default="auto", help="Detector device: auto (cuda, then mps, then cpu), cuda, mps, cpu.")
     p.add_argument("--no-window", action="store_true", help="No live window (then there are no keys either).")
@@ -965,6 +1044,12 @@ def parse_args(argv=None):
     missing = [str(f) for f in args.policies if not f.is_file()]
     if missing:
         p.error(f"not found: {', '.join(missing)}")
+    if args.calibration is not None:
+        args.calibration = args.calibration.expanduser()
+        if not args.calibration.is_file():
+            p.error(f"--calibration: {args.calibration} not found")
+        if np.load(args.calibration).shape != (4, 4):
+            p.error(f"--calibration: {args.calibration} is not a 4x4 cam_T_tag")
     return args
 
 
@@ -978,17 +1063,23 @@ def model_file(path, models_dir):
     return path
 
 
-def not_deployable(policy_path):
-    """Why the evaluation cannot run a policy file ("" = it can): it feeds the observations of the proprioceptive task
-    and expects a target per joint (cube_spin_policy.py). Teachers and history students on W&B take others."""
+def not_deployable(policy_path, calibrated):
+    """Why the evaluation cannot run a policy file ("" = it can): it feeds the observations of the proprioceptive task,
+    or of the extero task if calibrated (the camera's pose relative to the hand is known), and expects a target per
+    joint (cube_spin_policy.py). Teachers and history students on W&B take others."""
     import torch
-    from cube_spin_policy import NUM_JOINTS, OBS_DIM
+    from cube_spin_policy import NUM_JOINTS, OBS_DIM, OBS_DIM_EXTERO, observation_size
     try:
         policy = torch.jit.load(str(policy_path), map_location="cpu").eval()
+        size = observation_size(policy)
+        if size is None:
+            return f"takes neither the {OBS_DIM} proprioceptive observations nor the {OBS_DIM_EXTERO} with the cube pose"
+        if size == OBS_DIM_EXTERO and not calibrated:
+            return "takes the cube pose: give --calibration and --hand-to-tag"
         with torch.no_grad():
-            out = policy(torch.zeros(1, OBS_DIM))
-    except Exception:
-        return f"does not take the {OBS_DIM} proprioceptive observations"
+            out = policy(torch.zeros(1, size))
+    except Exception as e:
+        return f"cannot be run ({type(e).__name__}: {e})"
     if out.shape[-1] != NUM_JOINTS:
         return f"outputs {out.shape[-1]} actions, not {NUM_JOINTS}"
     return ""
@@ -1017,7 +1108,8 @@ def untested_policies(args, known):
     print(f"Models in {args.models_dir} against W&B {args.wandb_entity}/{args.wandb_project}:")
     for path, why in done:
         print(f"  tested    {path.name:28s} {why}")
-    unusable = {path: why for path in todo if (why := not_deployable(path))}
+    calibrated = args.calibration is not None or args.mock
+    unusable = {path: why for path in todo if (why := not_deployable(path, calibrated))}
     for path in todo:
         print(f"  untested  {path.name:28s} {'not evaluated: ' + unusable[path] if path in unusable else ''}".rstrip())
     todo = [path for path in todo if path not in unusable]
@@ -1040,7 +1132,8 @@ def main(argv=None):
         known = wandb_results.known_models(wandb_records(args))
     if args.auto:
         args.policies = untested_policies(args, known)
-    unusable = [f"{p}: {why}" for p in args.policies if (why := not_deployable(p))]
+    calibrated = args.calibration is not None or args.mock
+    unusable = [f"{p}: {why}" for p in args.policies if (why := not_deployable(p, calibrated))]
     if unusable:
         raise SystemExit("Cannot evaluate:\n  " + "\n  ".join(unusable))
     speeds = {}
@@ -1070,6 +1163,7 @@ def main(argv=None):
             while True:
                 ev.tick()
                 ev.key()
+                ev.print_cube_pose()
         ev.start_hand()
         if args.pose_only:
             ev.park()

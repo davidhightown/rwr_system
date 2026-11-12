@@ -183,7 +183,7 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
       python experiments/rl_inference/download_policies.py             # --dry-run: only list the new ones
    ```
 
-    The evaluation below uses `models_proprio/` only.
+      The steps below evaluate the proprioceptive policies in `models_proprio/`. For the policies in `models_extero/`, see [Policies with the cube pose](#policies-with-the-cube-pose) below.
 2. **Check the setup** (the hand is calibrated, the camera looks down at the palm on a USB 3 port, the W&B login of the installation is done):
    ```bash
       source ~/ros_ws/install/setup.zsh # source to get the handcontroller

@@ -51,7 +51,9 @@ DEFAULT_SPEED = 2.0  # rad/s, for a model without a goal speed on W&B
 REFERENCE_MODEL = "48_ibex"  # as in the other evaluation: run it now and then to see whether the hand changed
 MAX_START_C = 42.5  # cold start: the hottest motor at most this warm when the run starts (as in the other evaluation)
 CURVE_STEP_S = 0.5
-FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.csv", "temperatures.csv", "health.csv")
+FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.csv", "temperatures.csv", "health.csv",
+         "cube_obs.csv")
+OBS_DIM_PROPRIO = 74  # a run's policy takes more observations: it has the cube pose (cube_spin_policy.py)
 UPLOADED_OUTCOMES = ("completed", "too many drops")  # the others say nothing about the policy
 
 # results.csv column of eval_policies.py -> summary key
@@ -63,7 +65,8 @@ SUMMARY = {
     "longest_stall_s": "result/longest_stall_s",
     "drops": "result/drops", "first_drop_s": "result/first_drop_s", "pause_drop_s": "result/pause_drop_s",
     "wall_s": "result/wall_s",
-    "tracked_fraction": "cube/tracked_fraction", "detections_per_s": "cube/poses_per_s",
+    "tracked_fraction": "cube/tracked_fraction", "cube_obs_tracked_fraction": "cube/policy_tracked_fraction",
+    "detections_per_s": "cube/poses_per_s",
     "rejected_share": "cube/rejected_poses", "longest_gap_s": "cube/longest_gap_s", "gap_s": "cube/gap_s",
     "tilt_turns": "cube/tilt_turns", "cube_offset_mean_mm": "cube/offset_mean_mm",
     "cube_offset_max_mm": "cube/offset_max_mm", "camera_tilt_deg": "cube/camera_tilt_deg",
@@ -212,6 +215,7 @@ def config_of(meta, run_dir, known):
     start = number(meta.get("temp_max_start_c"))
     commit = str(meta.get("git_commit", ""))
     sim = dict(k.get("sim") or {})
+    observations = number(meta.get("observations")) or OBS_DIM_PROPRIO  # older runs: all proprioceptive
     return dict(
         model=dict(name=k.get("name", name), short_name=short or name, idx=k.get("idx"),
                    description=k.get("description", ""), checkpoint_iteration=k.get("checkpoint_iteration"),
@@ -220,7 +224,8 @@ def config_of(meta, run_dir, known):
         sim=sim,
         eval=dict(evaluator=EVALUATOR, session=run_dir.parent.name, run_folder=run_dir.name,
                   started=meta.get("time", ""), date=str(meta.get("time", ""))[:10], note=meta.get("note", ""),
-                  host=meta.get("host", ""), goal_rad_s=goal, own_goal_rad_s=own,
+                  host=meta.get("host", ""), observations=int(observations),
+                  cube_pose=observations > OBS_DIM_PROPRIO, goal_rad_s=goal, own_goal_rad_s=own,
                   at_own_goal=own is None or goal is None or abs(goal - own) <= 1e-6,
                   start_temp_max_c=start, cold_start=start is None or start <= MAX_START_C,
                   reference=k.get("name", name) == REFERENCE_MODEL,
@@ -252,7 +257,7 @@ def summary_of(meta):
 
 def tags_of(config, summary):
     return [t for t in (summary.get("result/outcome", ""), "reference" if config["eval"]["reference"] else "",
-                        EVALUATOR) if t]
+                        "cube_pose" if config["eval"].get("cube_pose") else "", EVALUATOR) if t]
 
 
 def read_csv(path):
