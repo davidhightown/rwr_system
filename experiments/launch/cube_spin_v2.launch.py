@@ -51,6 +51,42 @@ def generate_launch_description():
         description='true: the policy computes and logs actions but does not command the hand'
     )
 
+    goal_ang_vel_arg = DeclareLaunchArgument(
+        'goal_ang_vel',
+        default_value='1.0',
+        description='Commanded spin speed in rad/s, the sign sets the direction. Use the range of the training.'
+    )
+
+    goal_axis_arg = DeclareLaunchArgument(
+        'goal_axis',
+        default_value='z',
+        description='Spin axis x, y or z of the simulation frame (all-axes velocity policy, 82 observations)'
+    )
+
+    goal_flip_period_s_arg = DeclareLaunchArgument(
+        'goal_flip_period_s',
+        default_value='0.0',
+        description='If > 0, flip the spin direction every this many seconds'
+    )
+
+    goal_mode_arg = DeclareLaunchArgument(
+        'goal_mode',
+        default_value='uniform',
+        description='Goal orientations (84 observations): uniform (as trained) or face90 (one face turn per goal)'
+    )
+
+    goal_tolerance_arg = DeclareLaunchArgument(
+        'goal_tolerance',
+        default_value='0.4',
+        description='Goal orientations: a goal counts within this angle (rad)'
+    )
+
+    csv_log_path_arg = DeclareLaunchArgument(
+        'csv_log_path',
+        default_value='',
+        description='If set, log the observations, the joint commands and the cube pose to this CSV file'
+    )
+
     model_path_arg = DeclareLaunchArgument(
         'model_path',
         default_value='',
@@ -95,6 +131,12 @@ def generate_launch_description():
         calibration_arg,
         policy_arg,
         dry_run_arg,
+        goal_ang_vel_arg,
+        goal_axis_arg,
+        goal_flip_period_s_arg,
+        goal_mode_arg,
+        goal_tolerance_arg,
+        csv_log_path_arg,
         model_path_arg,
         hand_to_tag_x_arg,
         hand_to_tag_y_arg,
@@ -117,6 +159,12 @@ def launch_setup(context, *args, **kwargs):
     calibration_file = LaunchConfiguration('calibration').perform(context)
     policy_file = LaunchConfiguration('policy').perform(context)
     dry_run = LaunchConfiguration('dry_run').perform(context).lower() == 'true'
+    goal_ang_vel = float(LaunchConfiguration('goal_ang_vel').perform(context))
+    goal_axis = LaunchConfiguration('goal_axis').perform(context)
+    goal_flip_period_s = float(LaunchConfiguration('goal_flip_period_s').perform(context))
+    goal_mode = LaunchConfiguration('goal_mode').perform(context)
+    goal_tolerance = float(LaunchConfiguration('goal_tolerance').perform(context))
+    csv_log_path = os.path.expanduser(LaunchConfiguration('csv_log_path').perform(context))
     model_path = LaunchConfiguration('model_path').perform(context)
     hand_to_tag_x = float(LaunchConfiguration('hand_to_tag_x').perform(context))
     hand_to_tag_y = float(LaunchConfiguration('hand_to_tag_y').perform(context))
@@ -260,6 +308,12 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{
                 'policy_ckpt_path': os.path.expanduser(policy_file),
                 'dry_run': dry_run,
+                'goal_ang_vel': goal_ang_vel,
+                'goal_axis': goal_axis,
+                'goal_flip_period_s': goal_flip_period_s,
+                'goal_mode': goal_mode,
+                'goal_tolerance': goal_tolerance,
+                'csv_log_path': csv_log_path,
                 'hand_config_path': os.path.join(
                     get_package_share_directory('hand_control'),
                     'orca', 'configs', 'orcahand_v2', 'right', 'config.yaml'

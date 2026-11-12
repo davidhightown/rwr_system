@@ -2,7 +2,15 @@
 
 ### Run a faive_lab policy on the hand
 
-`rl_inference/policy_inference_cube_spin_v2.py` runs a policy trained in faive_lab (task `orca-v2-inhand-repose-v0`) on the real hand. Use the TorchScript file that faive_lab's `play.py` exports: `logs/rsl_rl/orca_v2_repose/<run>/exported/policy.pt`.
+`rl_inference/policy_inference_cube_spin_v2.py` runs a policy trained in faive_lab on the real hand. Use the TorchScript file that faive_lab's `play.py` exports: `logs/rsl_rl/orca_v2_repose/<run>/exported/policy.pt`. The node selects the observation from the number of inputs of the policy:
+
+| Inputs | Observation | Tasks |
+|---|---|---|
+| 74 | proprioception only | `orca-v2-inhand-repose-v0`, `orca-v2-inhand-all-axes-vel-v0` |
+| 82 | + the tracked cube pose; velocity command about x, y or z | `orca-v2-inhand-repose-extero-v0`, `orca-v2-inhand-all-axes-vel-extero-v0` (lemur) |
+| 84 | + the tracked cube pose; goal orientations as in DeXtreme | `orca-v2-inhand-goal-v0` (manta) |
+
+A policy with the cube pose needs the camera and the cube detector (`cube_spin_v2.launch.py`); it starts at the first cube pose and does not command the hand before.
 
 1. Start the hand controller (see [src/hand_control/README.md](../src/hand_control/README.md)):
     ```bash
@@ -20,12 +28,29 @@ Useful parameters (add each as `-p name:=value`):
 | Parameter | Default | Meaning |
 |---|---|---|
 | `dry_run` | `false` | `true`: compute and log actions, but do not command the hand |
-| `goal_ang_vel` | `1.0` | commanded spin speed about z in rad/s; the sign sets the direction |
+| `goal_ang_vel` | `1.0` | commanded spin speed in rad/s; the sign sets the direction |
+| `goal_axis` | `z` | spin axis `x`, `y` or `z` of the simulation's env frame (74 and 82 inputs) |
 | `goal_flip_period_s` | `0.0` | if > 0, flip the spin direction every this many seconds |
-| `csv_log_path` | `""` | if set, log observations, joint commands and the cube pose to this CSV file |
+| `goal_mode` | `uniform` | goal orientations (84 inputs): `uniform` as in training, or `face90`: each goal is one 90° face turn from the last |
+| `goal_tolerance` | `0.4` | goal orientations: a goal counts within this angle in rad (DeXtreme's test value) |
+| `cube_pose_timeout_s` | `0.25` | an older cube pose counts as lost (flag 0); the same as `timeout_s` of the simulated tracker |
+| `csv_log_path` | `""` | if set, log observations, joint commands, the cube pose and the goals reached to this CSV file |
 | `policy_hz` | `20.0` | policy rate; must match the training task |
 
-The joint limits, observation order and scales in the script must match the faive_lab task (`orca_v2_repose_env_cfg.py`).
+The joint limits, observation order and scales in `rl_inference/cube_spin_policy.py` must match the faive_lab task (`orca_v2_repose_env_cfg.py`).
+
+#### All-axes policies (optional subtask)
+
+Both run with the cube pose, so start them with the camera (all launch arguments go to the node as above):
+```bash
+# lemur, velocity about one axis: trained on x/y 0.6-1.0 rad/s and z 0.6-1.5 rad/s
+ros2 launch experiments cube_spin_v2.launch.py calibration:=... model_path:=... enable_hand_controller:=true \
+    policy:=models_proprio/lemur_policy.pt goal_axis:=x goal_ang_vel:=0.8
+# manta, goal orientations: the node samples the goals and shows the current one as the TF frame cube_goal in RViz
+ros2 launch experiments cube_spin_v2.launch.py calibration:=... model_path:=... enable_hand_controller:=true \
+    policy:=models_proprio/manta_policy.pt goal_mode:=face90
+```
+The axes are those of the simulation's env frame (`OBS_T_HAND` in the node): x is the x axis of `hand_root`, z is vertical when the hand is mounted as in the simulation.
 
 ### Evaluate policies on the real hand
 
@@ -144,7 +169,7 @@ The launch places the hand relative to the tag with the `hand_to_tag_*` argument
 - Joint positions look wrong after rebuilding: `calibration.yaml` lives in `install/` (see [src/hand_control/README.md](../src/hand_control/README.md)); calibrate again.
 
 **Policy**
-- `RuntimeError: The size of tensor a (74) must match the size of tensor b (81)` at startup: the policy expects a different observation than the script builds (e.g. a policy trained with the cube pose). `OBS_DIM` and the observation in the script must match the training task.
+- `RuntimeError: The size of tensor a (74) must match the size of tensor b (81)` at startup: the policy expects a different observation than the script builds. The node knows the layouts with 74, 82 and 84 inputs (`LAYOUTS` in `rl_inference/cube_spin_policy.py`); a policy of another task needs its observation added there.
 
 **Cube detection**
 - `checkpoint.pth.tar not found` when the detector starts: the model files are not downloaded yet; run `experiments/rl_inference/pose_estimation/download_models.sh`.
