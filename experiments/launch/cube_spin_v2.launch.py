@@ -60,13 +60,20 @@ def generate_launch_description():
 
     # ===== Tag to Hand Transform Arguments =====
     # Pose of the tag seen from the mount (mount_T_tag): x/y/z along the mount's axes, roll/pitch/yaw of the tag relative to them
-    # NOTE: these defaults were measured for the ORCA v1b mount. Measure them again for your ORCA v2 setup.
+    # Our ORCA v2 setup, measured with a ruler (2026-11-12): the tag (0.08 m) lies flat on the table, centred under the
+    # hand's axis; the mount is 345.8 mm from the tag horizontally (400 - 30 - 28 cos 30) and 248 mm above it
+    # (262 - 28 sin 30); the forearm points towards the tag, 30 deg below horizontal, palm up (as in the simulation).
+    # Then the tag in mount axes: x 0, y -0.042, z 0.423; roll 60 (forearm axis vs. tag z into the table).
+    # yaw depends on how the tag is turned on the table (direction of its x axis, viewed from the stand):
+    #   towards the fingertips 90, towards the stand -90, to the left 0, to the right 180.
+    # Checked 2026-11-12 with show_tag_axes.py: the tag's x axis points to the left, seen from the stand -> yaw 0.
+    # y corrected from the measured -0.042 to -0.04 (2026-11-13): the detected cube sat ~2 mm inside the palm in RViz.
     hand_to_tag_x_arg = DeclareLaunchArgument('hand_to_tag_x', default_value='0.0')
-    hand_to_tag_y_arg = DeclareLaunchArgument('hand_to_tag_y', default_value='0.05')
-    hand_to_tag_z_arg = DeclareLaunchArgument('hand_to_tag_z', default_value='0.055')
-    hand_to_tag_roll_arg = DeclareLaunchArgument('hand_to_tag_roll', default_value='90')
+    hand_to_tag_y_arg = DeclareLaunchArgument('hand_to_tag_y', default_value='-0.04')
+    hand_to_tag_z_arg = DeclareLaunchArgument('hand_to_tag_z', default_value='0.423')
+    hand_to_tag_roll_arg = DeclareLaunchArgument('hand_to_tag_roll', default_value='60')
     hand_to_tag_pitch_arg = DeclareLaunchArgument('hand_to_tag_pitch', default_value='0')
-    hand_to_tag_yaw_arg = DeclareLaunchArgument('hand_to_tag_yaw', default_value='180')
+    hand_to_tag_yaw_arg = DeclareLaunchArgument('hand_to_tag_yaw', default_value='0')
     
     # ===== Camera Arguments =====
     camera_name_arg = DeclareLaunchArgument(
@@ -88,6 +95,19 @@ def generate_launch_description():
         description='Enable hand controller node (connects to real robot)'
     )
     
+    fake_joint_states_arg = DeclareLaunchArgument(
+        'fake_joint_states',
+        default_value='false',
+        description='true: publish fixed joint angles (joint_state_publisher_gui) so RViz shows the hand model without '
+                    'the real hand. Do not use together with a running hand controller.'
+    )
+
+    tag_size_arg = DeclareLaunchArgument(
+        'tag_size',
+        default_value='0.08',
+        description='Side of the black square of the AprilTag (m), only for the tag marker in the camera overlay'
+    )
+
     # Launch the nodes using OpaqueFunction
     nodes = OpaqueFunction(function=launch_setup)
     
@@ -105,6 +125,8 @@ def generate_launch_description():
         camera_name_arg,
         camera_config_arg,
         enable_hand_controller_arg,
+        fake_joint_states_arg,
+        tag_size_arg,
         nodes,
     ])
 
@@ -127,6 +149,8 @@ def launch_setup(context, *args, **kwargs):
     camera_name = LaunchConfiguration('camera_name').perform(context)
     camera_config = LaunchConfiguration('camera_config').perform(context)
     enable_hand_controller = LaunchConfiguration('enable_hand_controller').perform(context).lower() == 'true'
+    fake_joint_states = LaunchConfiguration('fake_joint_states').perform(context).lower() == 'true'
+    tag_size = float(LaunchConfiguration('tag_size').perform(context))
     
     # ===== 1. Robot Hand Visualization =====
     orca_xacro = os.path.join(
@@ -169,6 +193,26 @@ def launch_setup(context, *args, **kwargs):
                     ('hand/policy_output', '/right/hand/joint_position_from_motor')]
     )
     
+    # ===== 2b. Fixed joint angles for the hand model, without the real hand (optional) =====
+    fake_joint_state_publisher = None
+    if fake_joint_states:
+        fake_joint_state_publisher = Node(
+            package='joint_state_publisher_gui',
+            executable='joint_state_publisher_gui',
+            namespace='right/hand',
+            name='fake_joint_state_publisher',
+            output='log',
+        )
+
+    # ===== 2c. Camera overlay: lets RViz draw the scene over the camera image =====
+    camera_overlay = Node(
+        package='experiments',
+        executable='camera_overlay.py',
+        name='camera_overlay',
+        output='log',
+        parameters=[{'camera_name': camera_name, 'tag_size': tag_size}],
+    )
+
     # ===== 3. OakD Camera Node =====
     oakd_node = Node(
         package="ingress",
@@ -303,6 +347,8 @@ def launch_setup(context, *args, **kwargs):
         robot_state_publisher,
         visualize_joints,
         oakd_node,
+        camera_overlay,
+        fake_joint_state_publisher,
         
         # TF publishers (camera → tag → hand)
         static_tf_tag_to_hand,
