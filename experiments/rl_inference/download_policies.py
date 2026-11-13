@@ -7,7 +7,8 @@
     python experiments/rl_inference/download_policies.py --update-info   # add the training info to older .json files
 
 Training logs every exported policy as a W&B artifact of type "model": in rwr-skin/orca_proprio (proprioceptive task,
-saved to models_proprio/) and rwr-skin/orca_extero (saved to models_extero/). The artifact is "policy-<run folder>"
+saved to models_proprio/), rwr-skin/orca_extero (saved to models_extero/) and rwr-skin/orca_optional (optional tasks,
+saved to models_proprio/). The artifact is "policy-<run folder>"
 (e.g. policy-2026-11-11_12-51-32_walrus), or "<name>-policy" for older runs; when a model has both, the first is taken.
 
 A model is saved as <models folder>/<name>_policy.pt, the name eval_policies.py and W&B use for it, with
@@ -35,7 +36,9 @@ sys.path.insert(0, str(HERE))
 
 from cube_eval.wandb_results import ENTITY, retry  # noqa: E402
 
-PROJECTS = {"proprio": ("orca_proprio", "models_proprio"), "extero": ("orca_extero", "models_extero")}
+# orca_optional: the optional tasks (e.g. paca_allaxes, all axes without the cube pose)
+PROJECTS = {"proprio": ("orca_proprio", "models_proprio"), "extero": ("orca_extero", "models_extero"),
+            "optional": ("orca_optional", "models_proprio")}
 RUN_FOLDER = re.compile(r"^policy-(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})_(.+)$")
 OLD_STYLE = re.compile(r"^(.+)-policy$")
 
@@ -91,6 +94,21 @@ def training_summary(config):
                 history=history, commands=commands)
 
 
+def reached_axes(summary, run):
+    """A run with an axis curriculum (command_axis_linear / _adaptive) keeps its start axis_probs in env_cfg (e.g.
+    [0, 0, 1]); the share of x and y commands it reached is the run's Curriculum/command_axis. Puts that into the
+    summary's continuous_rotation axis_probs (x and y equally), so eval_policies.py sees an all-axes model."""
+    try:
+        xy = float(run.summary.get("Curriculum/command_axis"))
+    except (TypeError, ValueError):
+        return
+    rotation = summary["commands"].get("continuous_rotation")
+    if rotation is None or not 0 <= xy <= 1:
+        return
+    rotation["axis_probs_start"] = rotation.get("axis_probs")
+    rotation["axis_probs"] = [round(xy / 2, 4), round(xy / 2, 4), round(1 - xy, 4)]
+
+
 def training_of(api, path, artifact):
     """The training info of the run that logged an artifact (or of the run in its metadata); {} if W&B has none."""
     runs = [lambda: artifact.logged_by()]
@@ -104,6 +122,7 @@ def training_of(api, path, artifact):
             continue
         summary = training_summary(dict(run.config)) if run is not None else {}
         if summary:
+            reached_axes(summary, run)
             return dict(run="/".join(run.path), **summary)
     return {}
 
