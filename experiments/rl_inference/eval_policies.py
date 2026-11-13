@@ -64,8 +64,11 @@ its .json (run download_policies.py --update-info for older ones). Teachers whos
 observations (swan, lark: 218) cannot run on the hand in any mode.
 
 Policies with the cube pose (task orca-v2-inhand-repose-extero-v0) get the camera's cube pose in the frame of the
-simulation, as policy_inference_cube_spin_v2.py on feat/exteroception-deployment gives it (cube_spin_policy.CubePose):
-the newest pose with the flag 1, or the last one with the flag 0 when it is older than --cube-pose-timeout. For that the
+simulation, as the simulated tracker of the training gives it (cube_spin_policy.CubePose): filtered as in
+cube_detection_node.py (Kalman filter for the position, slerp 0.25 for the orientation; the filters start again at every
+policy start), with the flag 1, or the last pose with the flag 0 when it is older than --cube-pose-timeout. The turns are
+counted from the unfiltered detections. Runs before 2026-11-13 gave the policy the unfiltered pose (W&B:
+eval.cube_filter = none). For that the
 script needs the camera's pose relative to the hand: --calibration (cam_T_tag from apriltag_calibration.py, made with the
 camera where it is now) and --hand-to-tag (the hand_to_tag_* arguments of cube_spin_v2.launch.py). --camera-only with
 --calibration prints the cube's position in the frame of the simulation: with the cube in the palm it is a few cm from
@@ -255,6 +258,7 @@ class HandLink:
         self.set_torque(True)
         with self.lock:
             policy.reset()
+            self.cube.restart()  # the tracker's filters start again, as at a reset in the task
             self.policy, self.clock, self.last_command, self.policy_on = policy, clock, None, True
 
     def stop_policy(self):
@@ -1006,10 +1010,12 @@ class Run:
                          s_per_goal=round(active / len(self.goal_times), 1) if self.goal_times else "")
 
         errors = "; ".join(f"{j}: {'+'.join(status_names(b))}" for j, b in zip(joints, status) if b)
+        from cube_spin_policy import CUBE_FILTER
         row = dict(
             time=datetime.fromtimestamp(self.t0).strftime("%Y-%m-%d %H:%M:%S"), model=self.name,
             policy_file=str(self.policy_path), policy_sha256=sha256(self.policy_path)[:12], git_commit=git_commit(),
-            observations=self.observations, cube_pose=self.cube_pose, mode=a.mode or "",
+            observations=self.observations, cube_pose=self.cube_pose,
+            cube_filter=CUBE_FILTER if self.cube_pose else "", mode=a.mode or "",
             axis=a.axis if a.mode == "all-axes" else "", action_alpha=a.action_alpha, **goals,
             goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
             wall_s=round(time.time() - self.t0, 1),

@@ -236,6 +236,8 @@ def config_of(meta, run_dir, known):
         eval=dict(evaluator=EVALUATOR, session=run_dir.parent.name, run_folder=run_dir.name,
                   started=meta.get("time", ""), date=str(meta.get("time", ""))[:10], note=meta.get("note", ""),
                   host=meta.get("host", ""), observations=int(observations), cube_pose=bool(cube_pose),
+                  # the filter on the cube pose the policy got; extero runs before 2026-11-13 had none
+                  cube_filter=meta.get("cube_filter", "none" if cube_pose else ""),
                   mode=meta.get("mode") or "", axis=meta.get("axis") or "z",
                   action_alpha=number(meta.get("action_alpha")) or 0.2, goal_rad_s=goal, own_goal_rad_s=own,
                   at_own_goal=own is None or goal is None or abs(goal - own) <= 1e-6,

@@ -153,24 +153,92 @@ def unique(quat_wxyz):
     return -quat_wxyz if quat_wxyz[0] < 0 else quat_wxyz
 
 
-class CubePose:
-    """The cube-pose part of the observation, as the simulated tracker gives it: the newest pose in the simulation's
-    frame with the flag 1, or, while the cube is lost (no pose for timeout_s), the last pose with the flag 0."""
+# The filters of cube_detection_node.py, as faive_lab's CubeTrackerModel (mdp/cube_tracker.py) gives them to the policy
+# in training: CUBE_TRACKER's kalman_q, kalman_r and slerp_alpha. Change them only together with faive_lab.
+CUBE_KALMAN_Q = 1e-3
+CUBE_KALMAN_R = 3e-3
+CUBE_SLERP_ALPHA = 0.25
+CUBE_FILTER_DT = 0.05       # the task's control step (20 Hz), for which faive_lab computes the steady-state gains
+CUBE_FILTER_MAX_GAP_S = 1.0  # after a longer gap (cube dropped, run paused) the filter starts again at the detection
+CUBE_FILTER = f"kalman q {CUBE_KALMAN_Q:g} r {CUBE_KALMAN_R:g}, slerp {CUBE_SLERP_ALPHA:g}"
 
-    def __init__(self, timeout_s=CUBE_POSE_TIMEOUT_S):
+
+def kalman_gains(q, r, dt, iterations=1000):
+    """Steady-state gains (position, velocity) of the node's constant-velocity Kalman filter for one axis; the same
+    computation as faive_lab's mdp/cube_tracker.py kalman_gains."""
+    p00, p01, p11 = 1e-2, 0.0, 1e-2  # errorCovPost at the start of the node's filter
+    k_pos, k_vel = 1.0, 0.0
+    for _ in range(iterations):
+        a00 = p00 + 2.0 * dt * p01 + dt * dt * p11 + q
+        a01 = p01 + dt * p11
+        a11 = p11 + q
+        k_pos, k_vel = a00 / (a00 + r), a01 / (a00 + r)
+        p00, p01, p11 = (1.0 - k_pos) * a00, (1.0 - k_pos) * a01, a11 - k_vel * a01
+    return k_pos, k_vel
+
+
+def slerp(q0, q1, alpha):
+    """From q0 towards q1 by alpha (unit quaternions, any order of the components); faive_lab's cube_tracker.slerp and
+    cube_detection_node.py's _slerp_quat."""
+    q0, q1 = np.asarray(q0, dtype=np.float64), np.asarray(q1, dtype=np.float64)
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1, dot = -q1, -dot
+    dot = min(dot, 1.0)
+    if dot > 0.9995:
+        s0, s1 = 1.0 - alpha, alpha
+    else:
+        theta = np.arccos(dot)
+        s0, s1 = np.sin((1.0 - alpha) * theta) / np.sin(theta), np.sin(alpha * theta) / np.sin(theta)
+    q = s0 * q0 + s1 * q1
+    return q / np.linalg.norm(q)
+
+
+class CubePose:
+    """The cube-pose part of the observation, as the simulated tracker gives it: the filtered pose in the simulation's
+    frame with the flag 1, or, while the cube is lost (no pose for timeout_s), the last pose with the flag 0.
+
+    With smoothing (default), every detection goes through the filters of faive_lab's CubeTrackerModel, which are those
+    of cube_detection_node.py: a constant-velocity Kalman filter with the steady-state gains for the position (the
+    prediction covers the time since the last detection) and slerp for the orientation. They start at the first
+    detection, after restart() and after a gap of more than CUBE_FILTER_MAX_GAP_S, as the simulated tracker starts at
+    the true pose at every reset. smoothing=False: the raw detections, as before 2026-11-13."""
+
+    def __init__(self, timeout_s=CUBE_POSE_TIMEOUT_S, smoothing=True):
         self.timeout_s = float(timeout_s)
+        self.smoothing = bool(smoothing)
+        self.k_pos, self.k_vel = kalman_gains(CUBE_KALMAN_Q, CUBE_KALMAN_R, CUBE_FILTER_DT)
         self.pos = self.quat = self.stamp = None
+        self._pos = self._vel = self._quat = None  # the filter state (float64)
+        self._restart = True
+
+    def restart(self):
+        """Start the filters again at the next detection (a new run, or after a pause); the last pose stays observed
+        until then."""
+        self._restart = True
 
     def update(self, stamp, hand_T_cube):
         """A new pose of the cube in hand_root (4x4) seen at stamp (seconds)."""
         if self.stamp is not None and stamp < self.stamp:
             return
         obs_T_cube = OBS_T_HAND @ np.asarray(hand_T_cube, dtype=float)
-        quat = wxyz(Rotation.from_matrix(obs_T_cube[:3, :3])).astype(np.float32)
+        pos = obs_T_cube[:3, 3].astype(np.float64)
+        quat = wxyz(Rotation.from_matrix(obs_T_cube[:3, :3])).astype(np.float64)
+        gap = None if self.stamp is None else float(stamp) - self.stamp
+        if self.smoothing and not self._restart and gap is not None and gap <= CUBE_FILTER_MAX_GAP_S:
+            predicted = self._pos + self._vel * gap
+            innovation = pos - predicted
+            self._pos = predicted + self.k_pos * innovation
+            self._vel = self._vel + self.k_vel * innovation
+            self._quat = slerp(self._quat, quat, CUBE_SLERP_ALPHA)
+        else:
+            self._pos, self._vel, self._quat = pos, np.zeros(3), quat
+        self._restart = False
+        quat = self._quat.astype(np.float32)
         # q and -q are the same rotation; the simulation's quaternion changes continuously, so keep the previous sign
         if self.quat is not None and np.dot(quat, self.quat) < 0:
             quat = -quat
-        self.pos, self.quat, self.stamp = obs_T_cube[:3, 3].astype(np.float32), quat, float(stamp)
+        self.pos, self.quat, self.stamp = self._pos.astype(np.float32), quat, float(stamp)
 
     def age(self, now):
         return float("inf") if self.stamp is None else now - self.stamp
