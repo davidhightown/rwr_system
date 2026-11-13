@@ -3,7 +3,7 @@
 does, and six sliders set the tag's pose from the mount until the virtual cube sits where the real one does.
 
     python experiments/rl_inference/tune_hand_to_tag.py \
-        --calibration experiments/cfgs/calibration/camera_extrinsics_2026-11-12.npy
+        --calibration experiments/cfgs/calibration/camera_extrinsics_2026-11-13.npy
 
 The script starts the hand controller as eval_policies.py does: THE HAND MOVES to its neutral pose, then to the
 evaluation's start pose, and holds it (torque off at the end). RViz shows the measured joint angles. Then put the cube
@@ -47,21 +47,21 @@ from cube_spin_policy import GOAL_POS, MOUNT_IN_HAND, OBS_T_HAND, hand_T_camera 
 HAND_CONFIG = REPO / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml"
 HAND_NODE = REPO / "src/hand_control/hand_control_node.py"
 LOG_DIR = REPO / "logs/tune_hand_to_tag"
-DEFAULT_CALIBRATION = REPO / "experiments/cfgs/calibration/camera_extrinsics_2026-11-12.npy"
+DEFAULT_CALIBRATION = REPO / "experiments/cfgs/calibration/camera_extrinsics_2026-11-13.npy"
 WINDOW = "hand-to-tag"
 SLIDERS = [("x mm", 500), ("y mm", 500), ("z mm", 500), ("roll deg", 180), ("pitch deg", 180), ("yaw deg", 180)]
 CUBE_POSE_TIMEOUT_S = 1.0  # shown as lost (red) after this long without a detection
 
 
 def start_values(args):
-    """--start, else hand_to_tag of the .yaml next to the calibration, else the estimate of 2026-11-12."""
+    """--start, else hand_to_tag of the .yaml next to the calibration, else the measurement of 2026-11-13."""
     if args.start is not None:
         return list(args.start)
     if args.calibration.with_suffix(".yaml").exists():
         values = yaml.safe_load(args.calibration.with_suffix(".yaml").read_text()).get("hand_to_tag")
         if values and len(values) == 6:
             return [float(v) for v in values]
-    return [0.0, -0.109, 0.320, 90.0, 0.0, 0.0]
+    return [0.0, -0.04, 0.423, 60.0, 0.0, 0.0]
 
 
 def to_sliders(values):
@@ -275,7 +275,7 @@ def main():
     p.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION, help="cam_T_tag of apriltag_calibration.py.")
     p.add_argument("--start", type=float, nargs=6, metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"),
                    help="Start values (m, deg). Default: hand_to_tag of the .yaml next to the calibration.")
-    p.add_argument("--tag-size", type=float, default=0.075, help="Black square of the tag (m), for RViz only.")
+    p.add_argument("--tag-size", type=float, default=0.08, help="Black square of the tag (m), for RViz only.")
     p.add_argument("--cube-edge", type=float, default=0.045)
     p.add_argument("--camera-id", default="")
     p.add_argument("--exposure-us", type=int, default=5000)

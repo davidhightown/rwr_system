@@ -60,13 +60,15 @@ def generate_launch_description():
 
     # ===== Tag to Hand Transform Arguments =====
     # Pose of the tag seen from the mount (mount_T_tag): x/y/z along the mount's axes, roll/pitch/yaw of the tag relative to them
-    # NOTE: these defaults were measured for the ORCA v1b mount. Measure them again for your ORCA v2 setup.
+    # Defaults: the extero evaluation setup (ORCA v2 on its stand, tag ID 9 of 0.08 m flat on the table beyond the
+    # fingertips), measured 2026-11-12/13; how, in experiments/cfgs/calibration/camera_extrinsics_2026-11-13.yaml.
+    # eval_policies.py --hand-to-tag uses the same defaults. Measure them again if the hand, its stand or the tag moved.
     hand_to_tag_x_arg = DeclareLaunchArgument('hand_to_tag_x', default_value='0.0')
-    hand_to_tag_y_arg = DeclareLaunchArgument('hand_to_tag_y', default_value='0.05')
-    hand_to_tag_z_arg = DeclareLaunchArgument('hand_to_tag_z', default_value='0.055')
-    hand_to_tag_roll_arg = DeclareLaunchArgument('hand_to_tag_roll', default_value='90')
+    hand_to_tag_y_arg = DeclareLaunchArgument('hand_to_tag_y', default_value='-0.04')
+    hand_to_tag_z_arg = DeclareLaunchArgument('hand_to_tag_z', default_value='0.423')
+    hand_to_tag_roll_arg = DeclareLaunchArgument('hand_to_tag_roll', default_value='60')
     hand_to_tag_pitch_arg = DeclareLaunchArgument('hand_to_tag_pitch', default_value='0')
-    hand_to_tag_yaw_arg = DeclareLaunchArgument('hand_to_tag_yaw', default_value='180')
+    hand_to_tag_yaw_arg = DeclareLaunchArgument('hand_to_tag_yaw', default_value='0')
     
     # ===== Camera Arguments =====
     camera_name_arg = DeclareLaunchArgument(
