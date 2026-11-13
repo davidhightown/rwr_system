@@ -255,6 +255,7 @@ class HandLink:
         self.set_torque(True)
         with self.lock:
             policy.reset()
+            self.cube.restart()  # the tracker's filters start again, as at a reset in the task
             self.policy, self.clock, self.last_command, self.policy_on = policy, clock, None, True
 
     def stop_policy(self):
@@ -1006,10 +1007,12 @@ class Run:
                          s_per_goal=round(active / len(self.goal_times), 1) if self.goal_times else "")
 
         errors = "; ".join(f"{j}: {'+'.join(status_names(b))}" for j, b in zip(joints, status) if b)
+        from cube_spin_policy import CUBE_FILTER
         row = dict(
             time=datetime.fromtimestamp(self.t0).strftime("%Y-%m-%d %H:%M:%S"), model=self.name,
             policy_file=str(self.policy_path), policy_sha256=sha256(self.policy_path)[:12], git_commit=git_commit(),
-            observations=self.observations, cube_pose=self.cube_pose, mode=a.mode or "",
+            observations=self.observations, cube_pose=self.cube_pose,
+            cube_filter=CUBE_FILTER if self.cube_pose else "", mode=a.mode or "",
             axis=a.axis if a.mode == "all-axes" else "", action_alpha=a.action_alpha, **goals,
             goal_rad_s=self.speed, outcome=self.outcome, active_s=round(active, 1),
             wall_s=round(time.time() - self.t0, 1),

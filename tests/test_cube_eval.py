@@ -344,7 +344,7 @@ def test_cube_pose_is_held_with_the_flag_0_when_lost():
 
 def test_cube_quaternion_keeps_its_sign_through_half_a_turn():
     from cube_spin_policy import OBS_T_HAND, CubePose
-    cube, last = CubePose(), None
+    cube, last = CubePose(smoothing=False), None
     for deg in range(0, 361, 10):
         cube.update(deg, np.linalg.inv(OBS_T_HAND) @ pose([0, 0, -0.05], Rotation.from_euler("z", deg, degrees=True)))
         w, x, y, z = cube.quat
@@ -353,6 +353,49 @@ def test_cube_quaternion_keeps_its_sign_through_half_a_turn():
             assert np.dot(cube.quat, last) > 0
         last = cube.quat.copy()
     assert cube.quat[0] < 0  # a full turn: -q, as the simulation's continuous quaternion
+
+
+def test_cube_pose_filters_as_the_simulated_tracker():
+    """The filters of faive_lab's CubeTrackerModel: the steady-state Kalman gains for the 20 Hz step (the values faive_lab
+    computes for CUBE_TRACKER), slerp 0.25 (about 3 steps of lag: ~17 deg at 2 rad/s), less noise on a still cube."""
+    from cube_spin_policy import OBS_T_HAND, CubePose, kalman_gains
+    assert kalman_gains(1e-3, 3e-3, 0.05) == pytest.approx((0.46082, 0.42394), abs=1e-5)
+    to_hand = np.linalg.inv(OBS_T_HAND)
+    cube = CubePose()
+    lags = []
+    for i in range(200):
+        t = i * 0.05
+        true = Rotation.from_euler("z", 2.0 * t)
+        cube.update(t, to_hand @ pose([0, 0, -0.05], true))
+        w, x, y, z = cube.quat
+        lags.append(np.degrees((Rotation.from_quat([x, y, z, w]) * true.inv()).magnitude()))
+    assert np.median(lags[50:]) == pytest.approx(17.2, abs=1.0)
+
+    rng = np.random.default_rng(0)
+    raw, smooth = CubePose(smoothing=False), CubePose()
+    out_raw, out_smooth = [], []
+    for i in range(400):
+        noisy = to_hand @ pose([0.0, 0.0, -0.05 + rng.normal(0, 0.004)])
+        raw.update(i * 0.05, noisy)
+        smooth.update(i * 0.05, noisy)
+        out_raw.append(raw.pos[2])
+        out_smooth.append(smooth.pos[2])
+    assert np.std(out_smooth[20:]) < 0.8 * np.std(out_raw[20:])
+
+
+def test_cube_pose_filter_starts_again_after_a_restart_or_a_long_gap():
+    from cube_spin_policy import CUBE_FILTER_MAX_GAP_S, OBS_T_HAND, CubePose
+    to_hand = np.linalg.inv(OBS_T_HAND)
+    cube = CubePose()
+    for i in range(20):
+        cube.update(i * 0.05, to_hand @ pose([0.0, 0.0, -0.05]))
+    cube.restart()  # a new run: the next detection is taken as it is
+    cube.update(1.0, to_hand @ pose([0.02, 0.0, -0.05]))
+    assert cube.pos == pytest.approx([0.02, 0.0, -0.05], abs=1e-6)
+    cube.update(1.0 + CUBE_FILTER_MAX_GAP_S + 0.1, to_hand @ pose([-0.01, 0.0, -0.05]))  # cube put back after a drop
+    assert cube.pos == pytest.approx([-0.01, 0.0, -0.05], abs=1e-6)
+    cube.update(1.0 + CUBE_FILTER_MAX_GAP_S + 0.15, to_hand @ pose([0.03, 0.0, -0.05]))  # 50 ms later: filtered
+    assert -0.01 < cube.pos[0] < 0.03
 
 
 def test_camera_pose_as_the_launch_file_builds_tf():
