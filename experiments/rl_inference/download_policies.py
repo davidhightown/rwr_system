@@ -82,7 +82,12 @@ def training_summary(config):
                if isinstance(cfg, dict) and cfg.get("history_length")}
     commands = {name: {k: cfg[k] for k in ("axis_probs", "angular_vel_range", "goal_mode") if cfg.get(k) is not None}
                 for name, cfg in (env.get("commands") or {}).items() if isinstance(cfg, dict)}
-    return dict(action_alpha=((env.get("actions") or {}).get("joint_pos") or {}).get("alpha"), actor_obs=actor_obs,
+    # a run with an alpha curriculum (GatedActionAlpha) keeps its start alpha in env_cfg; the alpha it ended at, which
+    # the policy must run with, is in the run config's deploy_action_alpha
+    alpha = config.get("deploy_action_alpha")
+    if alpha is None:
+        alpha = ((env.get("actions") or {}).get("joint_pos") or {}).get("alpha")
+    return dict(action_alpha=alpha, actor_obs=actor_obs,
                 history=history, commands=commands)
 
 
