@@ -12,8 +12,9 @@ results of both are in one place:
   result/rad_per_s, turns_30s, best_10s_rad_per_s and longest_stall_s are up to the first drop, as there, and the
   figures of the whole run are result/turns_total, result/duration_total_s and result/rad_per_s_total,
 - curves over the whole run's policy time (curve/turns, curve/max_temp_c, curve/total_current_a against time_s),
-- files: the run folder's CSV files and meta.json; video.mp4 when asked for (about 25 MB; eval_policies.py asks by
-  default), which is also added to a run already on W&B without it,
+- files: the run folder's CSV files and meta.json,
+- media: video.mp4 as a wandb.Video (eval/video, playable on the run's page) when asked for (about 25 MB;
+  eval_policies.py asks by default), which is also added to a run already on W&B without it,
 - the run "leaderboard", rebuilt from all runs on W&B as the other evaluation builds it: per model, its runs at its own
   goal speed with a cold start.
 
@@ -37,8 +38,11 @@ import fcntl
 import hashlib
 import json
 import re
+import shutil
 import statistics
+import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -52,6 +56,8 @@ REFERENCE_MODEL = "48_ibex"  # as in the other evaluation: run it now and then t
 MAX_START_C = 42.5  # cold start: the hottest motor at most this warm when the run starts (as in the other evaluation)
 CURVE_STEP_S = 0.5
 FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.csv", "temperatures.csv", "health.csv")
+VIDEO = "video.mp4"
+VIDEO_KEY = "eval/video"  # a wandb.Video: plays in the run's media panel (a file under Files does not)
 UPLOADED_OUTCOMES = ("completed", "too many drops")  # the others say nothing about the policy
 
 # results.csv column of eval_policies.py -> summary key
@@ -331,6 +337,22 @@ def leaderboard_rows(records):
     return sorted(rows, key=lambda row: -row["mean_turns"])
 
 
+def web_video(src, out):
+    """src as an mp4 that a browser plays while it loads (H.264, yuv420p, index first) at out; src itself if there is
+    no ffmpeg. The recorder's H.264 is only remuxed; its fallback (mp4v, which browsers do not play) is re-encoded."""
+    ffmpeg = Path(sys.executable).with_name("ffmpeg")
+    ffmpeg = str(ffmpeg) if ffmpeg.exists() else shutil.which("ffmpeg")
+    if not ffmpeg:
+        return Path(src)
+    probe = subprocess.run([str(Path(ffmpeg).with_name("ffprobe")), "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0", str(src)],
+                           capture_output=True, text=True)
+    codec = ["-c", "copy"] if probe.stdout.strip() == "h264,yuv420p" else ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    done = subprocess.run([ffmpeg, "-v", "error", "-y", "-i", str(src), *codec, "-an", "-movflags", "+faststart",
+                           str(out)], capture_output=True)
+    return Path(out) if done.returncode == 0 else Path(src)
+
+
 # -- talking to W&B
 class Project:
     def __init__(self, entity=ENTITY, project=PROJECT):
@@ -375,28 +397,32 @@ class Project:
         for point in curves(run_dir, number(meta.get("active_s"))):
             run.log(point)
         run.summary.update(summary)
-        for name in FILES + (("video.mp4",) if video else ()):
+        for name in FILES:
             if (run_dir / name).exists():
                 run.save(str(run_dir / name), base_path=str(run_dir), policy="now")
-        url = run.url
-        run.finish()
+        with tempfile.TemporaryDirectory() as tmp:  # wandb copies the video when it is logged
+            if video and (run_dir / VIDEO).exists():
+                run.log({VIDEO_KEY: wandb.Video(str(web_video(run_dir / VIDEO, Path(tmp) / VIDEO)), format="mp4")})
+            url = run.url
+            run.finish()
         return url, dict(id=rid, job_type="real_hand", config=config, summary=summary)
 
     def add_video(self, run_dir, wandb_dir=None):
-        """video.mp4 of a run folder to its run already on W&B; returns the run's url, or None if the folder has no
-        video or the run has it already."""
+        """video.mp4 of a run folder as VIDEO_KEY to its run already on W&B; returns the run's url, or None if the
+        folder has no video or the run has it already."""
         wandb = self.wandb
         run_dir = Path(run_dir)
-        if not (run_dir / "video.mp4").exists():
+        if not (run_dir / VIDEO).exists():
             return None
         rid = run_id(json.loads((run_dir / "meta.json").read_text()), run_dir)
-        if any(f.name == "video.mp4" for f in retry(lambda: list(self.api.run(f"{self.path}/{rid}").files()))):
+        if VIDEO_KEY in retry(lambda: self.api.run(f"{self.path}/{rid}").summary.keys()):
             return None
         run = wandb.init(entity=self.entity, project=self.project, id=rid, resume="must", reinit="finish_previous",
                          dir=str(wandb_dir or run_dir.parent), settings=wandb.Settings(silent=True))
-        run.save(str(run_dir / "video.mp4"), base_path=str(run_dir), policy="now")
-        url = run.url
-        run.finish()
+        with tempfile.TemporaryDirectory() as tmp:
+            run.log({VIDEO_KEY: wandb.Video(str(web_video(run_dir / VIDEO, Path(tmp) / VIDEO)), format="mp4")})
+            url = run.url
+            run.finish()
         return url
 
     def write_leaderboard(self, records, wandb_dir):
@@ -450,7 +476,8 @@ def main(argv=None):
     u.add_argument("models_dir", type=Path)
     up = sub.add_parser("upload", help="Upload run folders of eval_policies.py.")
     up.add_argument("run_dirs", nargs="+", type=Path)
-    up.add_argument("--video", action="store_true", help="Also video.mp4, also to runs already on W&B without it.")
+    up.add_argument("--video", action="store_true", help="Also video.mp4 (as eval/video), also to runs already on W&B "
+                    "without it.")
     args = ap.parse_args(argv)
     if args.command == "untested":
         todo, done = split_models(args.models_dir, known_models(Project(args.entity, args.project).records()))
