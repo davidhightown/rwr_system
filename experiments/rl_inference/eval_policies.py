@@ -1181,8 +1181,8 @@ def parse_args(argv=None):
     p.add_argument("--upload", nargs="+", type=Path, metavar="RUN_DIR", help="Only upload these saved run folders to "
                    "W&B (e.g. after a failed upload); runs already there are skipped.")
     p.add_argument("--wandb-video", action=argparse.BooleanOptionalAction, default=True,
-                   help="Also upload video.mp4 (about 25 MB per run); with --upload, also to runs already on W&B "
-                   "without it.")
+                   help="Also upload video.mp4 as a playable W&B video (eval/video, about 25 MB per run); with "
+                   "--upload, also to runs already on W&B without it.")
     p.add_argument("--wandb-entity", default=wandb_results.ENTITY, help=argparse.SUPPRESS)
     p.add_argument("--wandb-project", default=wandb_results.PROJECT, help=argparse.SUPPRESS)
     p.add_argument("--mock", action="store_true", help="No hardware: a drawn cube and a fake hand.")
