@@ -1155,10 +1155,11 @@ def parse_args(argv=None):
     p.add_argument("--calibration", type=Path, help="For policies with the cube pose: the camera calibration cam_T_tag "
                    "(.npy from apriltag_calibration.py), made with the camera where it is now. Policies without the "
                    "cube pose do not need it.")
-    p.add_argument("--hand-to-tag", type=float, nargs=6, default=[0.0, 0.05, 0.055, 90.0, 0.0, 180.0],
+    p.add_argument("--hand-to-tag", type=float, nargs=6, default=[0.0, -0.04, 0.423, 60.0, 0.0, 0.0],
                    metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"), help="With --calibration: the tag's pose measured "
                    "from the mount (m, deg), the hand_to_tag_* arguments of cube_spin_v2.launch.py. Default: the "
-                   "launch file's, measured for the ORCA v1b mount; measure them for your setup.")
+                   "launch file's, measured for the extero evaluation setup (experiments/cfgs/calibration/"
+                   "camera_extrinsics_2026-11-13.yaml); measure them again if the hand, its stand or the tag moved.")
     p.add_argument("--cube-pose-timeout", type=float, default=0.25, help="A policy with the cube pose gets an older "
                    "pose with the flag 0 (lost); = timeout_s of CUBE_TRACKER in faive_lab (s).")
     p.add_argument("--twin", action=argparse.BooleanOptionalAction, default=None, help="A digital twin in RViz and "

@@ -60,14 +60,9 @@ def generate_launch_description():
 
     # ===== Tag to Hand Transform Arguments =====
     # Pose of the tag seen from the mount (mount_T_tag): x/y/z along the mount's axes, roll/pitch/yaw of the tag relative to them
-    # Our ORCA v2 setup, measured with a ruler (2026-11-12): the tag (0.08 m) lies flat on the table, centred under the
-    # hand's axis; the mount is 345.8 mm from the tag horizontally (400 - 30 - 28 cos 30) and 248 mm above it
-    # (262 - 28 sin 30); the forearm points towards the tag, 30 deg below horizontal, palm up (as in the simulation).
-    # Then the tag in mount axes: x 0, y -0.042, z 0.423; roll 60 (forearm axis vs. tag z into the table).
-    # yaw depends on how the tag is turned on the table (direction of its x axis, viewed from the stand):
-    #   towards the fingertips 90, towards the stand -90, to the left 0, to the right 180.
-    # Checked 2026-11-12 with show_tag_axes.py: the tag's x axis points to the left, seen from the stand -> yaw 0.
-    # y corrected from the measured -0.042 to -0.04 (2026-11-13): the detected cube sat ~2 mm inside the palm in RViz.
+    # Defaults: the extero evaluation setup (ORCA v2 on its stand, tag ID 9 of 0.08 m flat on the table beyond the
+    # fingertips), measured 2026-11-12/13; how, in experiments/cfgs/calibration/camera_extrinsics_2026-11-13.yaml.
+    # eval_policies.py --hand-to-tag uses the same defaults. Measure them again if the hand, its stand or the tag moved.
     hand_to_tag_x_arg = DeclareLaunchArgument('hand_to_tag_x', default_value='0.0')
     hand_to_tag_y_arg = DeclareLaunchArgument('hand_to_tag_y', default_value='-0.04')
     hand_to_tag_z_arg = DeclareLaunchArgument('hand_to_tag_z', default_value='0.423')
