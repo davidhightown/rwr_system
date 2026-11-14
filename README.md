@@ -187,31 +187,32 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
 
 `experiments/rl_inference/eval_policies.py` runs exported policies one after another on the hand for 60 s each, counts the cube's turns with the camera from above, and uploads the results to W&B. One command starts the hand controller, the camera and a live window; do not start them yourself. Details (start pose, drops, heat pauses, all result columns): [experiments/README.md](experiments/README.md#evaluate-policies-on-the-real-hand).
 
-1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio` or `rwr-skin/orca_extero`. This copies those not yet here to `models_proprio/<name>_policy.pt` and `models_extero/<name>_policy.pt` (with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit, and what the training run used: action alpha, actor observations, history, commands). Files already there are left alone. Both folders are git-ignored.
+The same script runs all three kinds of policies. It tells them apart by their input size and the training info in the `.json` next to each file, and sets aside every model it cannot run with the arguments given, naming the arguments that would run it (e.g. `not evaluated: a distilled student with an LSTM: try --mode student`).
+
+| Policies | Trained in (W&B) | Saved to | Evaluate every untested one |
+|---|---|---|---|
+| [Proprioceptive](#proprioceptive-policies): spin about z, 74 observations | `rwr-skin/orca_proprio` | `models_proprio/` | `eval_policies.py` |
+| [Exteroceptive](#exteroceptive-policies-with-the-cube-pose): spin about z, 82 observations (the 74 and the cube pose) | `rwr-skin/orca_extero` | `models_extero/` | `eval_policies.py --models-dir models_extero --calibration CAM_T_TAG.npy` |
+| [Optional tasks](#optional-tasks-and-special-modes): all axes, goals; also students, history, other action alpha | `rwr-skin/orca_optional` (older ones in `orca_proprio`) | `models_proprio/` | `eval_policies.py --mode MODE` (+ `--calibration` for those with the cube pose) |
+
+Run every command from the repository root in a sourced terminal (`source ~/ros_ws/install/setup.zsh`, for the hand controller). Without model names, the script lists the models in `--models-dir` (default `models_proprio/`) with no run on W&B yet (none of the same file and none of the same name), and after Enter evaluates those it can run and uploads each run; `--dry-run` only prints the list. With model names (looked up in `--models-dir`; a path works too) it runs just those, and uploads them only with `--wandb`.
+
+#### Common steps
+
+1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio`, `rwr-skin/orca_extero` or `rwr-skin/orca_optional`. This copies those not yet here to `models_proprio/<name>_policy.pt` (proprio and optional) or `models_extero/<name>_policy.pt` (extero), with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit, and what the training run used (action alpha, actor observations, history, commands, the axes reached by an axis curriculum). Files already there are left alone. Both folders are git-ignored.
    ```bash
-       python experiments/rl_inference/download_policies.py             # --dry-run: only list the new ones
-       python experiments/rl_inference/download_policies.py --update-info   # add the training info to older .json files
-   ```
-   ```
-   The steps below evaluate the proprioceptive policies in `models_proprio/`. For the policies in `models_extero/`, see [Policies with the cube pose](#policies-with-the-cube-pose) below.
+   python experiments/rl_inference/download_policies.py                  # all three projects; --dry-run: only list the new ones
+   python experiments/rl_inference/download_policies.py --only optional  # one project: proprio, extero or optional
+   python experiments/rl_inference/download_policies.py --update-info    # add the training info to older .json files
    ```
 2. **Check the setup** (the hand is calibrated, the camera looks down at the palm on a USB 3 port, the W&B login of the installation is done):
    ```bash
-       source ~/ros_ws/install/setup.zsh # source to get the handcontroller
-
-       python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
-       python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
+   python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
+   python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
    ```
-3. **Evaluate every untested model.** Without arguments the script lists the models in `models_proprio/` with no run on W&B yet (none of the same file and none of the same name), sets aside those that need other arguments with a hint (e.g. `not evaluated: a distilled student with an LSTM: try --mode student`, see [Special modes](#special-modes) below), and after Enter evaluates the rest and uploads each run:
-   ```bash
-       python experiments/rl_inference/eval_policies.py --dry-run   # only the list: tested / untested
-       python experiments/rl_inference/eval_policies.py
-   ```
-   ```
-   To deploy specific models, name them (a name is looked up in `models_proprio/`; a path works too), and add `--wandb` to upload the runs: `python experiments/rl_inference/eval_policies.py --wandb walrus models/ibex_policy.pt`. Without `--wandb` nothing is uploaded for named models.
-   ```
+3. **Evaluate** with the commands in the section of your policies: [proprio](#proprioceptive-policies), [extero](#exteroceptive-policies-with-the-cube-pose) or [optional](#optional-tasks-and-special-modes).
 4. **Run.** Put the cube in the palm; each run starts by itself when the cube lies still and the motors are cool enough. If the cube falls, put it back: the run goes on. At the third drop the run ends and the next policy starts (`--max-drops 2`). Keys in the window: space = start or continue now, `n` = next policy, `q` = quit. Ctrl+C switches the torque off and stops.
-5. **Results.** Locally in `logs/real_eval/` (`results.csv` and a folder per run with the video). On W&B in [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval), in the same format as the other real-hand evaluation (one run per policy run, grouped by model, and the `leaderboard` run), with `eval.evaluator = eval_policies.py`. The upload runs in the background while the next policy starts. Only finished runs are uploaded (not skipped or aborted ones). The video of each run is uploaded too (about 25 MB; `--no-wandb-video` leaves it out). To add the videos to runs already on W&B, upload their folders again: `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/2026*_`*. If an upload failed (e.g. offline), the script prints the command to upload again, e.g. `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/20261111_203512_lark`.
+5. **Results.** Locally in `logs/real_eval/` (`results.csv` and a folder per run with the video). On W&B in [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval), in the same format as the other real-hand evaluation (one run per policy run, grouped by model, and the `leaderboard` run), with `eval.evaluator = eval_policies.py`. The upload runs in the background while the next policy starts. Only finished runs are uploaded (not skipped or aborted ones). The video of each run is uploaded too (about 25 MB; `--no-wandb-video` leaves it out). To add the videos to runs already on W&B, upload their folders again: `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/2026*_*`. If an upload failed (e.g. offline), the script prints the command to upload again, e.g. `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/20261111_203512_lark`.
 
 **Comparable with the other real-hand evaluation** (`evaluate_real_policies.py` on `feat/real-hand-evaluation`), whose runs are in the same W&B project and leaderboard:
 
@@ -220,44 +221,69 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
 - **Cold start:** the leaderboard also takes only runs that started with the hottest motor at most 42.5 °C, so a run starts only below that.
 - Left as they are: the start pose (wrist 33° here, 30° there), the camera exposure (5 ms here, automatic there), the heat rule (pause at 65 °C here, stop at 58 °C there) and the turn counting.
 
-#### Policies with the cube pose
+#### Proprioceptive policies
 
-The same script runs the policies of the extero task (`orca-v2-inhand-repose-extero-v0`, 82 observations: the 74 proprioceptive ones and the cube pose). It tells them apart by their input size. They need the camera's pose relative to the hand; without `--calibration` the script sets them aside. Details: [experiments/README.md](experiments/README.md#calibrate-the-camera).
+The policies of the proprio task in `models_proprio/` (74 observations: no cube pose). They need no camera calibration; the camera only counts the turns.
+
+```bash
+python experiments/rl_inference/eval_policies.py --dry-run     # only the list: tested / untested
+python experiments/rl_inference/eval_policies.py               # evaluate and upload every untested one
+python experiments/rl_inference/eval_policies.py --wandb walrus models/ibex_policy.pt   # named models (a name or a path)
+```
+
+Models in `models_proprio/` that need another setting (the optional tasks, students, …) are listed as `not evaluated` with the arguments to use: see [Optional tasks and special modes](#optional-tasks-and-special-modes).
+
+#### Exteroceptive policies (with the cube pose)
+
+The policies of the extero task (`orca-v2-inhand-repose-extero-v0`) in `models_extero/` (82 observations: the 74 proprioceptive ones and the cube pose). They need the camera's pose relative to the hand; without `--calibration` the script sets them aside. Details: [experiments/README.md](experiments/README.md#calibrate-the-camera).
 
 1. **Calibrate the camera** against an AprilTag (`tag36h11`), and again whenever the camera or the tag moves. Start the camera, then in a second sourced terminal run the calibration with your tag's ID and the size of its black square (m). Hold the camera and tag still for about 3 s. Stop the launch afterwards: the evaluation starts its own camera.
    ```bash
-       ros2 launch experiments cube_spin_v2.launch.py
+   ros2 launch experiments cube_spin_v2.launch.py
 
-   # in a second terminal 
-       source ~/ros_ws/install/setup.zsh
-       python3 experiments/rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.08 --output ~/camera_extrinsics.npy --visualize
+   # in a second terminal
+   source ~/ros_ws/install/setup.zsh
+   python3 experiments/rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.08 --output ~/camera_extrinsics.npy --visualize
    ```
-2. **Measure the tag's pose from the mount** (the centre of the forearm's flat bottom face): `X Y Z` in metres and `ROLL PITCH YAW` in degrees, along the mount's axes (x from the index finger towards the little finger, y out of the palm, z up the forearm). These are the `hand_to_tag_`* arguments of `cube_spin_v2.launch.py`, see [Set the hand's position](experiments/README.md#set-the-hands-position). The default (`0 -0.04 0.423 60 0 0`) is the extero evaluation setup's (tag ID 9 flat on the table beyond the fingertips; how it was measured: `experiments/cfgs/calibration/camera_extrinsics_2026-11-13.yaml`). Measure your own if the hand, its stand or the tag moved; `python3 experiments/rl_inference/show_tag_axes.py` shows the tag's axes live (with the camera running) to find the yaw. In the commands below, replace `X Y Z ROLL PITCH YAW` with your six numbers (e.g. `--hand-to-tag 0 0.15 0 180 0 0`), or leave out `--hand-to-tag` to use the default. To find or check them by eye, `python experiments/rl_inference/tune_hand_to_tag.py --calibration <file>.npy` moves the hand to the start pose and shows the hand and the live cube in RViz with six sliders for the values; put the cube in the palm and move the sliders until the virtual cube sits where the real one does (`s` saves them into the `.yaml` next to the calibration).
+   The calibration of the extero evaluation setup of 2026-11-13 is in the repository (`experiments/cfgs/calibration/camera_extrinsics_2026-11-13.npy`, described in the `.yaml` next to it). It is valid only while the camera and the tag stay where they were, so check it with step 3 before using it.
+2. **Measure the tag's pose from the mount** (the centre of the forearm's flat bottom face): `X Y Z` in metres and `ROLL PITCH YAW` in degrees, along the mount's axes (x from the index finger towards the little finger, y out of the palm, z up the forearm). These are the `hand_to_tag_*` arguments of `cube_spin_v2.launch.py`, see [Set the hand's position](experiments/README.md#set-the-hands-position). The default (`0 -0.04 0.423 60 0 0`) is the extero evaluation setup's (tag ID 9 flat on the table beyond the fingertips; how it was measured: `experiments/cfgs/calibration/camera_extrinsics_2026-11-13.yaml`). Measure your own if the hand, its stand or the tag moved; `python3 experiments/rl_inference/show_tag_axes.py` shows the tag's axes live (with the camera running) to find the yaw. In the commands below, replace `X Y Z ROLL PITCH YAW` with your six numbers (e.g. `--hand-to-tag 0 0.15 0 180 0 0`), or leave out `--hand-to-tag` to use the default. To find or check them by eye, `python experiments/rl_inference/tune_hand_to_tag.py --calibration <file>.npy` moves the hand to the start pose and shows the hand and the live cube in RViz with six sliders for the values; put the cube in the palm and move the sliders until the virtual cube sits where the real one does (`s` saves them into the `.yaml` next to the calibration).
 3. **Check the cube pose.** With the cube in the palm, the printed position is a few cm from (0, 0, -0.05), +z up. If not, fix the calibration or the tag's pose first:
    ```bash
-       python experiments/rl_inference/eval_policies.py --camera-only \
-           --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+   python experiments/rl_inference/eval_policies.py --camera-only \
+       --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
    ```
-4. **Evaluate.** Without model names, the script lists the models in `models_extero/` with no run on W&B yet, and evaluates and uploads them after Enter (`--dry-run`: only the list). Named models are looked up in `models_extero/` and uploaded only with `--wandb`:
+4. **Evaluate** every untested model in `models_extero/` (add `--dry-run`: only the list), or named models (uploaded only with `--wandb`):
    ```bash
-       python experiments/rl_inference/eval_policies.py --models-dir models_extero \
-           --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
-       python experiments/rl_inference/eval_policies.py --models-dir models_extero \
-           --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW --wandb <name>
+   python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+       --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+   python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+       --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW --wandb <name>
    ```
    The run itself works as above (start pose, drops, keys). Each run also writes `cube_obs.csv` (what the policy saw at each step), and `results.csv` gets `cube_obs_tracked_fraction`: the share of policy steps with a cube pose at most `--cube-pose-timeout` (0.25 s) old.
 
    **Digital twin.** With `--calibration`, the hand model in its measured joint angles and the cube where the policy sees it (in the simulation's frame, with the goal position as a green dot) are shown in the top right corner of the camera window, and so in `video.mp4`, and in a separate RViz window. The cube turns red while it is lost: the policy then gets its last pose. With `--camera-only` the hand stays in the start pose, so the cube's place in the palm shows whether the calibration is right. `--no-twin` turns both off; `--twin` turns them on without a calibration (e.g. with `--mock`). If the RViz window is closed, the evaluation goes on (log: `node_logs/twin.log`).
 
-#### Special modes
+#### Optional tasks and special modes
 
-Some policies were trained on other tasks or with other observations. The script never runs them on its own: the listing names the arguments each one needs, and a run with those arguments evaluates only the models that need them (`--dry-run` shows which). A model counts as tested only with runs in the setting it needs.
+The optional tasks (spinning about every axis, turning the cube to goal orientations) are trained in `rwr-skin/orca_optional`, and `download_policies.py` puts them into `models_proprio/` next to the proprio policies. They, and other policies trained with other observations or another action alpha, never run without the matching arguments: the listing names the arguments each one needs, and a run with them evaluates only the models that need them (add `--dry-run` to see which). A model counts as tested only with runs in the setting it needs. Policies that take the cube pose (`lemur`, `manta`) also need `--calibration` (and `--hand-to-tag` if not the default), as in steps 1–3 of [the extero policies](#exteroceptive-policies-with-the-cube-pose). With `--models-dir models_extero` the same arguments run extero policies that need them.
 
+```bash
+# all axes: spin about --axis x, y or z (lemur, paca_allaxes); one axis per command
+python experiments/rl_inference/eval_policies.py --mode all-axes --axis z
+python experiments/rl_inference/eval_policies.py --mode all-axes --axis x --calibration ~/camera_extrinsics.npy
+# goals: turn the cube to random orientations (manta)
+python experiments/rl_inference/eval_policies.py --mode goals --calibration ~/camera_extrinsics.npy
+# distilled students, history policies, another action alpha
+python experiments/rl_inference/eval_policies.py --mode student
+python experiments/rl_inference/eval_policies.py --mode history
+python experiments/rl_inference/eval_policies.py --action-alpha 0.5
+```
+
+- `--mode all-axes --axis x|y|z`: policies trained to spin about every axis (`lemur` with the cube pose, `paca_allaxes` without). A model counts as all-axes when its training commanded x or y (`axis_probs` in its `.json`; with an axis curriculum, the share it reached). The turns are counted about that axis as the camera sees it, so x and y need `--calibration` (or `--mock`) even for policies without the cube pose. The default speed is the top of the model's training range about the axis. Runs about x and y are on W&B but not in the leaderboard.
+- `--mode goals`: the goal task (`manta`, 84 inputs): the policy turns the cube to random orientations; a goal counts as reached within `--goal-tolerance` (0.4 rad). The score is the goals in a row (`goals`, `goals_before_first_drop`); a run ends after `--goal-timeout` (80 s) without a goal, and lasts 120 s by default. Needs `--calibration`. On W&B with `result/goals` and the tag `goals`, but not in the leaderboard. The digital twin shows the goal orientation as a second cube beside the hand.
 - `--mode student`: distilled students with an LSTM (`cygnet_lstm`, `lark_lstm`; the memory is cleared at every reset) or with 10 steps of history of every observation (740 inputs: `cygnet_hist`, `lark_hist`).
 - `--mode history`: 5 steps of history of the joint positions and the last joint commands (210 inputs: `newt`, `tapir`).
-- `--mode all-axes --axis x|y|z`: policies trained to spin about every axis (`lemur`). Needs `--calibration` (or `--mock`) for x and y; the turns are counted about that axis. Runs about x and y are on W&B but not in the leaderboard.
-- `--mode goals`: the goal task (`manta`, 84 inputs): the policy turns the cube to random orientations; a goal counts as reached within `--goal-tolerance` (0.4 rad). The score is the goals in a row (`goals`, `goals_before_first_drop`); a run ends after `--goal-timeout` (80 s) without a goal, and lasts 120 s by default. Needs `--calibration`. On W&B with `result/goals` and the tag `goals`, but not in the leaderboard. The digital twin shows the goal orientation as a second cube beside the hand.
-- `--action-alpha A`: policies trained with another action alpha than 0.2 (`paca_alpha05`, `paca_alpha08`).
+- `--action-alpha A`: policies trained with another action alpha than 0.2 (`paca_alpha05`, `paca_alpha08`). Combines with the modes and with `--models-dir models_extero`.
 
 Teachers that take the 218 privileged observations of the simulation (`swan`, `lark`) cannot run on the hand in any mode.
 
