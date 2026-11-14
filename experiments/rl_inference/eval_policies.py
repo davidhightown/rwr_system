@@ -55,8 +55,9 @@ student with an LSTM: try --mode student", and with that --mode it runs those (a
                        model's training range about the axis
     --mode goals       the goal task (manta, after DeXtreme): a random goal orientation, the next one as soon as the
                        tracked cube is within --goal-tolerance (0.4 rad) of it; the score is the number of goals before
-                       the first drop, the run ends after --goal-timeout s without a goal; 120 s by default, not
-                       uploaded to W&B (its leaderboard is for spinning), goals.csv with the time of every goal
+                       the first drop, the run ends after --goal-timeout s without a goal; 120 s by default; on W&B
+                       with result/goals (not in the spinning leaderboard), goals.csv with the time of every goal;
+                       the digital twin shows the goal orientation as a second cube beside the hand
     --action-alpha A   policies trained with another action alpha (paca_alpha05, paca_alpha08)
 
 The script knows what a policy needs from its input size and the training info that download_policies.py saves in
@@ -503,6 +504,9 @@ class Evaluation:
             elif self.twin_render_process is not None and not self.twin_render_process.is_alive():
                 self.twin_stopped = True
                 print("  The digital twin in the video stopped (see the error above); the evaluation goes on.")
+        if self.twin is not None:  # the goal task: the twin shows the goal orientation as a second cube
+            goals = self.run.goals if self.run is not None else None
+            self.twin.set_goal(None if goals is None else goals.quat, None if goals is None else goals.error)
         now = time.time()
         if self.status_q is not None and now - self.last_status_push >= 0.1:
             self.last_status_push = now
@@ -785,9 +789,6 @@ class Evaluation:
         """The run to W&B in a background process (log: node_logs/wandb_upload.log), so the next run can start."""
         if self.args.mock:
             print("  not uploaded to W&B: a --mock run")
-            return
-        if self.args.mode == "goals":
-            print("  not uploaded to W&B: its leaderboard is for spinning; the goal runs are in results.csv")
             return
         if outcome not in wandb_results.UPLOADED_OUTCOMES:
             print(f"  not uploaded to W&B: {outcome}")

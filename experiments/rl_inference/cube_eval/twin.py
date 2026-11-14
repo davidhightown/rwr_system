@@ -9,7 +9,8 @@ child processes, and its own ROS node publishes:
 - TF sim_world -> hand_root (cube_spin_policy.OBS_T_HAND),
 - /cube_eval/twin (MarkerArray): the cube as cube_spin_policy.CubePose gives it to the policy (textured while tracked,
   red and transparent while lost, when the policy gets the last pose with the flag 0), the goal position and a status
-  text.
+  text; in the goal task (--mode goals) also the goal orientation: a second cube at GOAL_CUBE_POS, turned to the goal,
+  to compare its faces with the cube's.
 With panel_q, the same state also goes to twin_render, which draws the twin into the evaluation's video.
 """
 
@@ -32,6 +33,14 @@ CUBE_MESH = "package://viz/models/dexcube/dex_cube_instanceable.dae"
 CUBE_MESH_EDGE = 0.06  # edge length of the mesh (m)
 RATE_HZ = 30.0
 JOINTS_TIMEOUT_S = 1.0
+# The goal cube (--mode goals), from GOAL_POS (m, sim_world): above and beside the hand, in the empty top left of
+# the video's twin panel.
+GOAL_CUBE_OFFSET = (-0.08, 0.0, 0.08)
+
+
+def goal_cube_pos():
+    from cube_spin_policy import GOAL_POS
+    return tuple(float(a + b) for a, b in zip(GOAL_POS, GOAL_CUBE_OFFSET))
 
 
 def hand_urdf():
@@ -61,6 +70,7 @@ class Twin:
         self.lock = threading.Lock()
         self.cube = CubePose(cube_pose_timeout)
         self.q, self.q_time = None, 0.0
+        self.goal, self.goal_error = None, None  # the goal orientation (w x y z) and rad to it (--mode goals), or None
         self.log_dir = Path(log_dir)
         self.panel_q = panel_q  # the state for twin_render (the twin in the video), or None
         self.processes = []
@@ -127,6 +137,13 @@ class Twin:
         with self.lock:
             self.cube.update(stamp, hand_T_cube)
 
+    def set_goal(self, quat, error=None):
+        """The goal orientation (w x y z, in the frame the simulation observes the cube in) and the rad from the
+        tracked cube to it; None hides the goal cube."""
+        with self.lock:
+            self.goal = None if quat is None else np.array(quat, dtype=np.float64)
+            self.goal_error = None if error is None else float(error)
+
     # -- the executor thread
     def _joints(self, msg):
         q = np.array(msg.data, dtype=np.float64)
@@ -142,20 +159,25 @@ class Twin:
             pos = None if self.cube.pos is None else self.cube.pos.copy()
             quat = None if self.cube.quat is None else self.cube.quat.copy()
             age, timeout = self.cube.age(now), self.cube.timeout_s
+            goal = None if self.goal is None else self.goal.copy()
+            goal_error = self.goal_error
         q = np.where(np.isfinite(q), q, self.start_pose)
         tracked = age <= timeout
         lines = self._status_lines(pos is not None, tracked, age, measured)
+        if goal is not None:
+            lines.append("goal orientation: the cube marked goal" + (
+                "" if goal_error is None else f", {np.degrees(goal_error):.0f} deg away"))
         self.joint_msg.header.stamp = self.node.get_clock().now().to_msg()
         self.joint_msg.position = q.tolist()
         self.joint_pub.publish(self.joint_msg)
-        self.marker_pub.publish(self._markers(pos, quat, tracked, lines))
+        self.marker_pub.publish(self._markers(pos, quat, tracked, lines, goal))
         if self.panel_q is not None:
             try:
                 self.panel_q.get_nowait()
             except queue.Empty:
                 pass
             try:
-                self.panel_q.put_nowait((now, q, pos, quat, tracked, lines))
+                self.panel_q.put_nowait((now, q, pos, quat, tracked, lines, goal))
             except queue.Full:
                 pass
 
@@ -167,7 +189,7 @@ class Twin:
             lines.append("no joint angles: start pose shown")
         return lines
 
-    def _markers(self, pos, quat, tracked, lines):
+    def _markers(self, pos, quat, tracked, lines, goal=None):
         from cube_spin_policy import GOAL_POS
         M = self._Marker
         stamp = self.node.get_clock().now().to_msg()
@@ -192,6 +214,19 @@ class Twin:
             cube.pose.orientation.x, cube.pose.orientation.y, cube.pose.orientation.z, cube.pose.orientation.w = x, y, z, w
             cube.mesh_resource, cube.mesh_use_embedded_materials = CUBE_MESH, tracked
             markers.append(cube)
+        if goal is None:
+            markers += [M(ns="goal_cube", id=0, action=M.DELETE), M(ns="goal_label", id=0, action=M.DELETE)]
+        else:
+            s = self.cube_edge / CUBE_MESH_EDGE
+            target = marker("goal_cube", M.MESH_RESOURCE, goal_cube_pos(), [s] * 3, (0, 0, 0, 0))
+            w, x, y, z = (float(v) for v in goal)
+            target.pose.orientation.x, target.pose.orientation.y = x, y
+            target.pose.orientation.z, target.pose.orientation.w = z, w
+            target.mesh_resource, target.mesh_use_embedded_materials = CUBE_MESH, True
+            label = marker("goal_label", M.TEXT_VIEW_FACING, np.add(goal_cube_pos(), (0.0, 0.0, 0.05)), (0, 0, 0.01),
+                           (0.3, 1.0, 0.4, 1))
+            label.text = "goal"
+            markers += [target, label]
         text = marker("status", M.TEXT_VIEW_FACING, np.add(GOAL_POS, (0.0, 0.0, 0.09)), (0, 0, 0.01), (1, 1, 1, 1))
         text.text = "\n".join(lines)
         markers.append(text)

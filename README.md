@@ -256,7 +256,7 @@ Some policies were trained on other tasks or with other observations. The script
 - `--mode student`: distilled students with an LSTM (`cygnet_lstm`, `lark_lstm`; the memory is cleared at every reset) or with 10 steps of history of every observation (740 inputs: `cygnet_hist`, `lark_hist`).
 - `--mode history`: 5 steps of history of the joint positions and the last joint commands (210 inputs: `newt`, `tapir`).
 - `--mode all-axes --axis x|y|z`: policies trained to spin about every axis (`lemur`). Needs `--calibration` (or `--mock`) for x and y; the turns are counted about that axis. Runs about x and y are on W&B but not in the leaderboard.
-- `--mode goals`: the goal task (`manta`, 84 inputs): the policy turns the cube to random orientations; a goal counts as reached within `--goal-tolerance` (0.4 rad). The score is the goals in a row (`goals`, `goals_before_first_drop`); a run ends after `--goal-timeout` (80 s) without a goal, and lasts 120 s by default. Needs `--calibration`. Not uploaded to W&B.
+- `--mode goals`: the goal task (`manta`, 84 inputs): the policy turns the cube to random orientations; a goal counts as reached within `--goal-tolerance` (0.4 rad). The score is the goals in a row (`goals`, `goals_before_first_drop`); a run ends after `--goal-timeout` (80 s) without a goal, and lasts 120 s by default. Needs `--calibration`. On W&B with `result/goals` and the tag `goals`, but not in the leaderboard. The digital twin shows the goal orientation as a second cube beside the hand.
 - `--action-alpha A`: policies trained with another action alpha than 0.2 (`paca_alpha05`, `paca_alpha08`).
 
 Teachers that take the 218 privileged observations of the simulation (`swan`, `lark`) cannot run on the hand in any mode.

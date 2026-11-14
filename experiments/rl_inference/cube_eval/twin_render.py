@@ -3,7 +3,8 @@ a policy with the cube pose sees it, in the simulation's frame, drawn offscreen 
 of its own.
 
 twin.Twin sends its state to state_q: (time, joint angles in the hand driver's order, cube position and quaternion
-w x y z or None, cube tracked, status lines). The process puts (time, BGR panel) on image_q, and the camera process
+w x y z or None, cube tracked, status lines, goal orientation w x y z or None). The goal orientation is drawn as a
+second cube at twin.goal_cube_pos(). The process puts (time, BGR panel) on image_q, and the camera process
 pastes the newest panel into its frame (hud.picture_in_picture).
 """
 
@@ -89,6 +90,7 @@ def _run(state_q, image_q, stop, joint_ids, cube_edge):
     from ament_index_python.packages import get_package_share_directory
     from cube_spin_policy import GOAL_POS, OBS_T_HAND
     from .hud import GREEN, RED, WHITE, text
+    from .twin import goal_cube_pos
 
     share = Path(get_package_share_directory("viz"))
     with tempfile.TemporaryDirectory() as folder, quiet():
@@ -106,7 +108,10 @@ def _run(state_q, image_q, stop, joint_ids, cube_edge):
         shape = p.createVisualShape(p.GEOM_MESH, vertices=(vertices * cube_edge / 2).tolist(), indices=indices,
                                     uvs=uvs.tolist(), normals=normals.tolist())
         cube = p.createMultiBody(baseVisualShapeIndex=shape, basePosition=[0, 0, -10])
-        p.changeVisualShape(cube, -1, textureUniqueId=p.loadTexture(str(share / CUBE_TEXTURE)))
+        texture = p.loadTexture(str(share / CUBE_TEXTURE))
+        p.changeVisualShape(cube, -1, textureUniqueId=texture)
+        goal_cube = p.createMultiBody(baseVisualShapeIndex=shape, basePosition=[0, 0, -10])
+        p.changeVisualShape(goal_cube, -1, textureUniqueId=texture)
         lost = p.createMultiBody(baseVisualShapeIndex=p.createVisualShape(
             p.GEOM_BOX, halfExtents=[cube_edge / 2] * 3, rgbaColor=[1.0, 0.25, 0.25, 1.0]), basePosition=[0, 0, -10])
         p.createMultiBody(baseVisualShapeIndex=p.createVisualShape(p.GEOM_SPHERE, radius=0.004,
@@ -116,6 +121,10 @@ def _run(state_q, image_q, stop, joint_ids, cube_edge):
     width, height = PANEL_SIZE
     view = p.computeViewMatrix(EYE, TARGET, [0, 0, 1])
     projection = p.computeProjectionMatrixFOV(FOV_DEG, width / height, 0.01, 2.0)
+    # the pixel of the goal cube's label ("goal", above it)
+    clip = (np.array(projection).reshape(4, 4).T @ np.array(view).reshape(4, 4).T
+            @ np.array([*np.add(goal_cube_pos(), (0.0, 0.0, cube_edge)), 1.0]))
+    goal_label = (int((clip[0] / clip[3] + 1) / 2 * width) - 14, int((1 - clip[1] / clip[3]) / 2 * height))
     state, shown = None, None
     while not stop.is_set():
         t0 = time.time()
@@ -126,9 +135,14 @@ def _run(state_q, image_q, stop, joint_ids, cube_edge):
             pass
         if state is not None and state is not shown:
             shown = state
-            _, q, pos, quat, tracked, lines = state
+            _, q, pos, quat, tracked, lines, goal = state
             for j, k in joints:
                 p.resetJointState(hand, j, float(q[k]))
+            if goal is None:
+                p.resetBasePositionAndOrientation(goal_cube, [0, 0, -10], [0, 0, 0, 1])
+            else:
+                w_, x_, y_, z_ = goal
+                p.resetBasePositionAndOrientation(goal_cube, list(goal_cube_pos()), [x_, y_, z_, w_])
             for body, visible in ((cube, pos is not None and tracked), (lost, pos is not None and not tracked)):
                 if visible:
                     w_, x_, y_, z_ = quat
@@ -140,6 +154,8 @@ def _run(state_q, image_q, stop, joint_ids, cube_edge):
             panel = cv2.cvtColor(np.reshape(rgba, (height, width, 4))[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2BGR)
             panel[np.reshape(mask, (height, width)) < 0] = BACKGROUND
             text(panel, "digital twin: what the policy sees", (8, 18), WHITE, 0.45)
+            if goal is not None:
+                text(panel, "goal", goal_label, GREEN, 0.45)
             for i, line in enumerate(lines):
                 color = GREEN if line == "cube tracked" else RED if line.startswith("cube lost") else WHITE
                 text(panel, line, (8, height - 12 - 18 * (len(lines) - 1 - i)), color, 0.42)

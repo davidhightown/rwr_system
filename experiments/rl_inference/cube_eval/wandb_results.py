@@ -56,7 +56,7 @@ REFERENCE_MODEL = "48_ibex"  # as in the other evaluation: run it now and then t
 MAX_START_C = 42.5  # cold start: the hottest motor at most this warm when the run starts (as in the other evaluation)
 CURVE_STEP_S = 0.5
 FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.csv", "temperatures.csv", "health.csv",
-         "cube_obs.csv")
+         "cube_obs.csv", "goals.csv")
 OBS_DIM_PROPRIO = 74  # a run's policy takes more observations: it has the cube pose (cube_spin_policy.py)
 VIDEO = "video.mp4"
 VIDEO_KEY = "eval/video"  # a wandb.Video: plays in the run's media panel (a file under Files does not)
@@ -86,6 +86,9 @@ SUMMARY = {
     "servo_errors": "hand/servo_errors", "temperature_glitches": "hand/temperature_glitches",
     "joint_delay_median_ms": "hand/median_lag_ms", "worst_joint": "hand/worst_joint",
     "worst_joint_error_rms_deg": "hand/worst_joint_error_deg", "joint_error_rms_deg": "hand/joint_error_rms_deg",
+    # the goal task (--mode goals); empty in the spinning runs, so left out there
+    "goals": "result/goals", "goals_before_first_drop": "result/goals_before_drop",
+    "first_goal_s": "result/first_goal_s", "s_per_goal": "result/s_per_goal",
 }
 STOP_REASONS = {"completed": "time", "too many drops": "too many drops"}
 
@@ -277,7 +280,8 @@ def summary_of(meta):
 
 def tags_of(config, summary):
     return [t for t in (summary.get("result/outcome", ""), "reference" if config["eval"]["reference"] else "",
-                        "cube_pose" if config["eval"].get("cube_pose") else "", EVALUATOR) if t]
+                        "cube_pose" if config["eval"].get("cube_pose") else "",
+                        "goals" if config["eval"].get("mode") == "goals" else "", EVALUATOR) if t]
 
 
 def read_csv(path):
@@ -300,6 +304,11 @@ def curves(run_dir, duration):
     c = np.array([0.0] + [c for _, c in turns])
     for p in points:  # the last counted value before each point
         p["curve/turns"] = float(c[np.searchsorted(t, p["time_s"], side="right") - 1])
+    if (run_dir / "goals.csv").exists():  # the goal task: the goals reached so far
+        goal_times = [number(r.get("policy_time_s")) for r in read_csv(run_dir / "goals.csv")]
+        goal_times = np.sort([g for g in goal_times if g is not None])
+        for p in points:
+            p["curve/goals"] = int(np.searchsorted(goal_times, p["time_s"], side="right"))
     temps = [r for r in read_csv(run_dir / "temperatures.csv") if number(r.get("policy_time_s")) is not None
              and r.get("state") == "running"]
     if temps:
@@ -473,9 +482,6 @@ def upload_runs(run_dirs, video=False, entity=ENTITY, project=PROJECT):
         meta = json.loads((d / "meta.json").read_text())
         if meta.get("outcome") not in UPLOADED_OUTCOMES:
             print(f"  {d.name}: not uploaded ({meta.get('outcome')})")
-            continue
-        if meta.get("mode") == "goals":
-            print(f"  {d.name}: not uploaded (a run of the goal task; the leaderboard is for spinning)")
             continue
         url, record = p.upload(d, video=video, records=records, wandb_dir=d.parent)
         if record is None:
