@@ -33,6 +33,9 @@ are off, the motors start cool, and on macOS `caffeinate` keeps the laptop from 
 
 import argparse
 import json
+import contextlib
+import io
+import os
 import shutil
 import signal
 import subprocess
@@ -56,6 +59,73 @@ MODE_LABELS = dict(proprio="PROPRIOCEPTIVE", extero="EXTEROCEPTIVE (camera)", ax
                    goals="OPTIONAL - GOAL ORIENTATIONS")
 KEYS = "SPACE start   P pause   E stop   N next run   Q quit   F fullscreen"
 WARMUP_STEPS = 50
+PROGRESS_EVERY_S = 10.0  # a progress line this often (policy time) while a run runs
+COOLING_REPORT_S = 15.0  # a line about the hottest motors this often while cooling
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+STYLES = dict(info="", ok="32", warn="33", error="31;1", head="36;1", dim="2", key="35")
+
+
+def log(message, style="info"):
+    """One line in the terminal: the time, then the message (coloured in a terminal, unless NO_COLOR is set)."""
+    code = STYLES.get(style, "")
+    text = f"\033[{code}m{message}\033[0m" if COLOR and code else message
+    print(f"{datetime.now():%H:%M:%S}  {text}", flush=True)
+
+
+def rule(title, style="head"):
+    log(f"==== {title} {'=' * max(4, 100 - len(title))}", style)
+
+
+class Progress:
+    """The run's progress line in the terminal, every ``every`` seconds of policy time."""
+
+    def __init__(self, demo, run, duration, every):
+        self.demo, self.run, self.duration, self.every = demo, run, duration, every
+        self.next = every
+        self.loop_hz = []           # the policy loop's rate at every report, for the end of the run
+        self.detections = 0
+        self.last = (0.0, 0)        # (policy time, detections) at the last report
+
+    def maybe_report(self):
+        if self.every > 0 and self.run.elapsed() >= self.next:
+            self.next += self.every
+            self.report()
+
+    def report(self, final=False):
+        d, run, hand = self.demo, self.run, self.demo.hand
+        t = min(run.elapsed(), self.duration)
+        parts = [f"{t:5.1f}/{self.duration:.0f} s"]
+        f = run.figures()
+        if run.goals is not None:
+            err = f.get("goal_error_deg")
+            parts.append(f"goals {f.get('goals', 0)}, to the goal {'-' if err is None else f'{err:.0f} deg'}")
+        elif d.args.camera:
+            parts.append(f"turns {f.get('turns', 0.0):+6.2f}, speed {f.get('speed', 0.0):+.2f}/{run.speed:+.1f} rad/s")
+        if d.args.camera:
+            n = len(run.detection_elapsed)
+            dt = t - self.last[0]
+            parts.append(f"cube {(n - self.last[1]) / dt:4.1f} poses/s" if dt > 0 else "cube -")
+            self.last = (t, n)
+        loop = hand.loop_stats()
+        if loop is not None:
+            self.loop_hz.append(loop["hz"])
+            parts.append(f"loop {loop['hz']:4.1f} Hz (jitter {loop['jitter_ms']:.1f} ms, step {loop['infer_ms']:.1f} ms)")
+        elif not final:
+            parts.append("loop -")
+        status = d.extra_status()["demo"]
+        if status["track_err_deg"] is not None:
+            parts.append(f"tracking {status['track_err_deg']:.1f} deg")
+        temps = hand.temperatures()
+        if temps is not None:
+            hot = int(np.nanargmax(temps))
+            parts.append(f"hottest {d.joint_ids[hot]} {temps[hot]:.0f} C")
+        style = "ok" if loop is None or loop["hz"] >= 18.0 else "warn"
+        if final and len(self.loop_hz) > 1:
+            parts.append(f"loop over the run: mean {np.mean(self.loop_hz):.1f} Hz, min {np.min(self.loop_hz):.1f} Hz")
+        log("  " + " | ".join(parts), style)
+        if loop is not None and loop["hz"] < 18.0:
+            log(f"  WARNING: the policy loop runs at {loop['hz']:.1f} Hz instead of 20 (laptop busy? on battery?)",
+                "warn")
 
 
 class EmergencyStop(Exception):
@@ -178,7 +248,6 @@ def preflight(plan, args):
 def keep_awake():
     """macOS: no sleep and no App Nap for this process while the demo runs (caffeinate ends with it)."""
     if sys.platform == "darwin" and shutil.which("caffeinate"):
-        import os
         return subprocess.Popen(["caffeinate", "-dimsu", "-w", str(os.getpid())], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
     return None
@@ -197,6 +266,7 @@ class Demo(Evaluation):
         self.rows = [None] * len(plan["runs"])
         self.run_number, self.state, self.countdown = 0, "starting", None
         self.summarized = False
+        self.progress_every = float(getattr(args, "progress_every", PROGRESS_EVERY_S))
         self.policy_name, self.task = Path(args.policies[0]).stem.removesuffix("_policy"), ""
         config = yaml.safe_load(ev.HAND_CONFIG.read_text())
         roms = config["joint_roms"]
@@ -236,7 +306,11 @@ class Demo(Evaluation):
             cmd_deg=tolist(cmd), current_ma=tolist(current), voltage_v=voltage, loop=loop, track_err_deg=track,
             params=self.params, keys=KEYS))
 
-    def set_state(self, state, banner=None, color="yellow", countdown=None):
+    def set_state(self, state, banner=None, color="yellow", countdown=None, note=None):
+        """The dashboard's state and banner; the terminal gets a line when the state changes (note: its text)."""
+        if state != self.state:
+            style = dict(running="ok", cooling="warn", stopped="error", done="head", countdown="ok").get(state, "info")
+            log(f"  [{state.upper()}] {note or banner or ''}".rstrip(), style)
         self.state, self.countdown = state, countdown
         phase_color = dict(running="green", cooling="orange", stopped="red", countdown="green").get(state, "yellow")
         self.show(state, phase_color, banner, color)
@@ -244,8 +318,12 @@ class Demo(Evaluation):
     def demo_keys(self, running=False):
         """The keys pressed since the last call: q, n, e (and p while running) raise; returns True for SPACE."""
         space = False
+        names = {"q": "Q (quit)", "n": "N (next run)", "e": "E (emergency stop)", "p": "P (pause)"}  # SPACE: where
+        # it does something (wait_start, hold_stopped)
         while self.keys:
             k = self.keys.popleft().lower()
+            if k in names and (k != "p" or running):
+                log(f"  key {names[k]}", "key")
             if k == "q":
                 raise Quit
             if k == "n":
@@ -273,6 +351,7 @@ class Demo(Evaluation):
 
     def _wait_start(self, remaining, first):
         armed = False
+        last_report = 0.0
         while True:
             self.tick()
             self.check_controller()
@@ -293,20 +372,29 @@ class Demo(Evaluation):
                 else:
                     hot = int(np.nanargmax(temps))
                     below = self.start_temp if first else float(np.min(self.thermal.start_below(remaining)))
-                    self.set_state("cooling", f"COOLING: {self.joint_ids[hot]} {temps[hot]:.0f} C, "
-                                   f"{'start' if first else 'continue'} below {below:.0f} C", "orange")
+                    what = "start" if first else "continue"
+                    self.set_state("cooling", f"COOLING: {self.joint_ids[hot]} {temps[hot]:.0f} C, {what} below "
+                                   f"{below:.0f} C", "orange", note=f"motors too warm to {what}; torque off, cooling")
+                    if time.time() - last_report >= COOLING_REPORT_S:
+                        last_report = time.time()
+                        warm = ", ".join(f"{self.joint_ids[i]} {temps[i]:.0f}" for i in np.argsort(-temps)[:3])
+                        log(f"    cooling: hottest {warm} C (mean {np.nanmean(temps):.1f} C), {what} below "
+                            f"{below:.1f} C", "warn")
                 continue
             if not armed:
-                self.set_state("waiting", "Put the cube in the palm, then press SPACE", "yellow")
+                self.set_state("waiting", "Put the cube in the palm, then press SPACE", "yellow",
+                               note=f"motors ok (hottest {np.nanmax(temps):.0f} C): put the cube in the palm, then "
+                               "press SPACE in the dashboard")
                 armed = space
                 if not armed:
                     continue
+                log("  key SPACE: countdown", "key")
                 t0 = time.time()
             left = self.countdown_s - (time.time() - t0)
             if left <= 0:
                 return
             self.set_state("countdown", f"{'START' if first else 'CONTINUE'} IN {np.ceil(left):.0f} - hands away",
-                           "green", countdown=float(left))
+                           "green", countdown=float(left), note=f"{self.countdown_s:.0f} s, hands away")
 
     def hold_stopped(self, why):
         """After E: torque off where the hand is, until SPACE (continue) or N / Q."""
@@ -314,11 +402,13 @@ class Demo(Evaluation):
         try:
             self.hand.set_torque(False)
         except RuntimeError as e:
-            print(f"  could not switch the torque off ({e}): switch the hand's power off")
-        print(f"  {why}: torque off")
-        self.set_state("stopped", "TORQUE OFF  -  SPACE: continue the run   N: next run   Q: quit", "red")
+            log(f"  could not switch the torque off ({e}): SWITCH THE HAND'S POWER OFF", "error")
+        log(f"  {why}: torque off", "error")
+        self.set_state("stopped", "TORQUE OFF  -  SPACE: continue the run   N: next run   Q: quit", "red",
+                       note="SPACE continues the run, N goes to the next one, Q quits")
         while not self.demo_keys():
             self.tick()
+        log("  key SPACE: continue", "key")
 
     def demo_run(self, index, label, axis):
         from cube_spin_policy import CubeSpinPolicy
@@ -327,7 +417,9 @@ class Demo(Evaluation):
         speed = 0.0 if self.kind == "goals" else speed_for(self.plan, a.policies[0], axis)
         policy = CubeSpinPolicy(a.policies[0], self.joint_ids, goal_ang_vel=speed, use_cube_pose=None,
                                 action_alpha=a.action_alpha, axis=axis, goal_tolerance=a.goal_tolerance)
+        t_warm = time.perf_counter()
         warm_up(policy)
+        warm_ms = (time.perf_counter() - t_warm) * 1000
         self.task = (f"goal orientations within {np.degrees(policy.goals.tolerance):.0f} deg" if policy.goals is not None
                      else f"spin {speed:+.1f} rad/s about {axis}")
         run_dir = self.session_dir / f"{index + 1}_{label.replace(' ', '_')}_{self.policy_name}"
@@ -337,17 +429,26 @@ class Demo(Evaluation):
         self.status.update(model=f"{self.policy_name}   {self.task}", duration=a.duration, goal=speed, home=None,
                            goals=None, trail_id=self.status["trail_id"] + 1, record=None, record_on=True,
                            running=False, elapsed=0.0, turns=0.0, speed=0.0, drops=0, goal_error_deg=None)
-        print(f"\n=== run {index + 1}/{len(self.plan['runs'])} ({label}): {self.policy_name}, {self.task}, "
-              f"{a.duration:.0f} s")
+        print(flush=True)
+        rule(f"RUN {index + 1}/{len(self.plan['runs'])} ({label})  {self.policy_name}: {self.task}, {a.duration:.0f} s")
+        log(f"  policy: {policy.obs_dim} observations, {'with' if policy.use_cube_pose else 'without'} the cube pose"
+            f"{', recurrent' if policy.recurrent else ''}, action alpha {a.action_alpha:g}, warm-up {WARMUP_STEPS} "
+            f"steps in {warm_ms:.0f} ms", "dim")
+        log(f"  files: {run_dir}", "dim")
         hand.goal_log = run.goal_times
         row = None
         try:
+            log("  moving to the start pose, then torque off")
             self.park()
             hand.reset_health()
             self.wait_start(a.duration, first=True)
             home = self.pose[1] if self.pose is not None and self.pose_age() < 1.0 else np.zeros(3)
             run.begin(home, hand.temperatures(), speed)
             self.run = run
+            temps = hand.temperatures()
+            log(f"  start: motors mean {np.nanmean(temps):.1f} C, hottest {np.nanmax(temps):.1f} C"
+                + (", cube seen in the palm" if self.pose is not None and self.pose_age() < 1.0 else ""), "ok")
+            progress = Progress(self, run, a.duration, self.progress_every)
             # no home in the view: its circle is the drop distance, and drop detection is off
             self.status.update(home=None, record=str(run_dir / "video.mp4") if self.record_video else None)
             while run.elapsed() < a.duration:
@@ -362,6 +463,7 @@ class Demo(Evaluation):
                         self.tick()
                         self.check_controller()
                         run.log_health(hand, "running")
+                        progress.maybe_report()
                         temps = hand.temperatures()
                         if temps is not None and self.thermal.over_limit(temps) is not None:
                             interruption = "heat"
@@ -381,21 +483,23 @@ class Demo(Evaluation):
                 self.status.update(record_on=False)
                 if interruption == "heat":
                     hot = self.thermal.over_limit(hand.temperatures())
-                    print(f"  {run.elapsed():5.1f} s: {self.joint_ids[hot]} reached {hand.temperatures()[hot]:.0f} C, "
-                          "cooling with the torque off")
+                    log(f"  {run.elapsed():5.1f} s: {self.joint_ids[hot]} reached {hand.temperatures()[hot]:.0f} C "
+                        f"(limit {a.temp_limit:.0f} C): cooling with the torque off", "warn")
                     hand.set_torque(False)
                     run.heat_pauses += 1
                 elif interruption == "pause":
-                    print(f"  {run.elapsed():5.1f} s: paused (P)")
+                    log(f"  {run.elapsed():5.1f} s: paused: hand to the start pose, torque off", "warn")
                     self.park()
                 else:
-                    self.hold_stopped(f"{run.elapsed():5.1f} s: emergency stop (E)")
+                    self.hold_stopped(f"{run.elapsed():5.1f} s: emergency stop")
+                log(f"  {remaining:.1f} s of the run left")
                 self.wait_start(remaining, first=False)
                 self.status.update(record_on=True)
             run.outcome = run.outcome or "completed"
+            progress.report(final=True)
         except Skip:
             run.outcome = "skipped"
-            print("  next run (N)")
+            log("  run skipped", "warn")
         except (Quit, KeyboardInterrupt):
             run.outcome = "aborted"
             raise
@@ -408,7 +512,13 @@ class Demo(Evaluation):
             run.pause()
             self.run = None
             if run.started:
-                row = self.finish(run)
+                log(f"  run over ({run.outcome}): parking the hand and writing the files")
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):  # the evaluation's lines (in proprio its turns mean nothing)
+                    row = self.finish(run)
+                for line in out.getvalue().splitlines():
+                    if line.strip() and (self.args.camera or "could not" in line):
+                        log(line.rstrip(), "dim")
             else:
                 try:
                     run_dir.rmdir()
@@ -417,13 +527,17 @@ class Demo(Evaluation):
         if row is not None:
             self.rows[index] = row
             self.results[index] = headline(self.kind, row)
+            r = self.results[index]
+            log(f"  RESULT run {index + 1} ({label}): {r['headline']} ({r['detail']}) in {row['active_s']} s, motors "
+                f"{row['temp_max_start_c']:.0f} -> {row['temp_max_end_c']:.0f} C, {row['heat_pauses']} heat pauses",
+                "ok" if row["outcome"] == "completed" else "warn")
 
     def session(self):
         self.session_dir.mkdir(parents=True, exist_ok=True)
         for index, (label, axis) in enumerate(self.plan["runs"]):
             self.demo_run(index, label, axis)
         self.summary()
-        self.set_state("done", "Demo finished  -  Q: quit", "white")
+        self.set_state("done", "Demo finished  -  Q: quit", "white", note="demo finished: Q in the dashboard quits")
         while True:
             self.tick()
             self.demo_keys()
@@ -432,13 +546,20 @@ class Demo(Evaluation):
         if self.summarized:
             return
         self.summarized = True
-        lines = [f"{label:10s} {r['headline'] if r else '-':>14s}  {r['detail'] if r else ''}"
-                 for (label, _), r in zip(self.plan["runs"], self.results)]
-        print(f"\nDemo {self.kind} with {self.policy_name}:\n  " + "\n  ".join(lines))
+        print(flush=True)
+        rule(f"RESULTS  {MODE_LABELS[self.kind]}  {self.policy_name}")
+        log(f"  {'run':10s} {'result':>14s}  {'detail':30s} {'outcome':12s} {'policy s':>8s}  {'motors C':>9s}", "dim")
+        for (label, _), r, row in zip(self.plan["runs"], self.results, self.rows):
+            if row is None:
+                log(f"  {label:10s} {'-':>14s}  not run")
+                continue
+            log(f"  {label:10s} {r['headline']:>14s}  {r['detail']:30s} {row['outcome']:12s} {row['active_s']:>8}  "
+                f"{row['temp_max_start_c']:>3.0f} -> {row['temp_max_end_c']:<3.0f}",
+                "ok" if row["outcome"] == "completed" else "warn")
         (self.session_dir / "summary.json").write_text(json.dumps(dict(
             kind=self.kind, model=self.policy_name, config=self.plan, results=self.results,
             rows=[None if r is None else {k: str(v) for k, v in r.items()} for r in self.rows]), indent=1, default=str))
-        print(f"  files in {self.session_dir}")
+        log(f"  files in {self.session_dir}", "dim")
 
 
 def headline(kind, row):
@@ -449,6 +570,19 @@ def headline(kind, row):
     if kind == "proprio":
         return dict(headline=f"{row['active_s']:.0f} s", detail=f"{row['outcome']}, peak {row['temp_peak_c']:.0f} C")
     return dict(headline=f"{row['turns']:+.1f} turns", detail=f"{row['mean_speed_rad_s']:+.2f} rad/s mean")
+
+
+def logged(step):
+    """step() with what eval_policies.py prints turned into log lines (its own "Starting ..." lines left out: the
+    demo says what starts). The lines come when the step is done."""
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            return step()
+    finally:
+        for line in out.getvalue().splitlines():
+            if line.strip() and not line.startswith("Starting"):
+                log("  " + line.strip(), "dim")
 
 
 def warm_up(policy):
@@ -470,42 +604,67 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true", help="Only the pre-flight check; nothing starts.")
     p.add_argument("--mock", action="store_true", help="Rehearsal without hardware: a fake hand and a drawn cube.")
     p.add_argument("--windowed", action="store_true", help="The dashboard in a window, not full screen.")
+    p.add_argument("--progress-every", type=float, default=PROGRESS_EVERY_S, metavar="S", help="A progress line in "
+                   "the terminal every S seconds of a run (default %(default)g; 0: none).")
     cli = p.parse_args(argv)
     plan = load_plan(cli.config, cli.mode, cli.task)
     args = eval_args(plan, cli)
+    args.progress_every = cli.progress_every
+    rule(f"ORCA HAND DEMO  {MODE_LABELS[plan['kind']]}")
     if preflight(plan, args):
+        log("Pre-flight check failed: fix the config, nothing was started.", "error")
         return 1
     if cli.dry_run:
+        log("Dry run: nothing was started.", "ok")
         return 0
 
     import torch
-    torch.set_num_threads(int(plan["common"].get("torch_threads", 1)))
+    threads = int(plan["common"].get("torch_threads", 1))
+    torch.set_num_threads(threads)
     Path(args.out).mkdir(parents=True, exist_ok=True)
     signal.signal(signal.SIGTERM, ev._terminate)
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, ev._terminate)
     awake = keep_awake()
+    log(f"Performance: torch on {threads} thread(s), RViz {'on' if args.rviz else 'off'}, W&B off, "
+        f"{'caffeinate on (no sleep, no App Nap)' if awake is not None else 'no caffeinate (not macOS)'}", "dim")
     demo = Demo(args, plan)
+    log(f"Results: {demo.session_dir}", "dim")
     code = 0
+    t_start = time.time()
     try:
-        demo.start_vision()
+        log("Starting the window" + (" and the camera with the cube detector" if args.camera else " (no camera)")
+            + " ...")
+        logged(demo.start_vision)
         if args.twin:
-            demo.start_twin()
-        demo.start_hand()
+            log("Starting the digital twin ...")
+            logged(demo.start_twin)
+        log(f"Starting the hand controller (servo acc {'from config.yaml' if args.servo_acc is None else args.servo_acc})"
+            ": THE HAND MOVES to its neutral pose ...", "warn")
+        logged(demo.start_hand)
+        temps = demo.hand.temperatures()
+        volts = demo.hand.voltage
+        log(f"Hand ready: {len(demo.joint_ids)} joints, motors mean {np.nanmean(temps):.1f} C, hottest "
+            f"{demo.joint_ids[int(np.nanargmax(temps))]} {np.nanmax(temps):.1f} C"
+            + (f", supply {np.nanmin(volts):.1f} V" if volts is not None and np.any(np.isfinite(volts)) else ""),
+            "ok")
+        log(f"Keys in the dashboard: {KEYS}", "dim")
         demo.session()
     except Quit:
-        print("\nStopped (Q).")
+        log("Stopped (Q).", "warn")
         if any(demo.results):
             demo.summary()
     except KeyboardInterrupt:
-        print("\nStopped (Ctrl+C).")
+        log("Stopped (Ctrl+C).", "warn")
     except RuntimeError as e:
-        print(f"\nError: {e}")
+        log(f"Error: {e}", "error")
         code = 1
     finally:
+        log("Shutting down: torque off, closing the camera and the hand controller ...")
         demo.shutdown()
         if awake is not None:
             awake.terminate()
+        log(f"Done after {(time.time() - t_start) / 60:.1f} min.", "ok" if code == 0 else "error")
     return code
 
 
