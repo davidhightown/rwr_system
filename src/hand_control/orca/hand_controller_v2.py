@@ -11,12 +11,15 @@ FEETECH_PRESENT_VOLTAGE = 62  # 0.1 V per unit; register 63 is the temperature i
 
 
 class OrcaHandV2:
-    def __init__(self, config_path: str):
+    def __init__(self, config_path: str, acceleration_raw=None):
         # An explicit config_path skips orca_core's hardware autodetection.
         # calibration.yaml is read from and saved next to config_path.
+        # acceleration_raw: the servo ramp to write instead of the config's servo_acceleration_raw (None: the config's)
         self._hand = load_hand(config_path=config_path)
         with open(config_path) as stream:
             self._config_yaml = yaml.safe_load(stream)
+        if acceleration_raw is not None:
+            self._config_yaml[servo_profile.CONFIG_KEY] = acceleration_raw
         servo_profile.acceleration_raw(self._config_yaml)  # reject a bad value before the hand moves
         config = self._hand.config
         self.joint_ids = list(config.joint_ids)

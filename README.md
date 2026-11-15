@@ -287,6 +287,71 @@ python experiments/rl_inference/eval_policies.py --action-alpha 0.5
 
 Teachers that take the 218 privileged observations of the simulation (`swan`, `lark`) cannot run on the hand in any mode.
 
+### Demo mode (live demo with a dashboard)
+
+`experiments/rl_inference/demo.py` shows one policy spinning the cube to TAs and visitors. It is built on `eval_policies.py` (same start pose, hand controller, camera and cube detector), with these differences: every demo is 3 runs of 60 s with the same policy, drop detection is off (the policy keeps running when the cube falls), a run starts only when every motor is below `start_temp_c` (38 °C), a full-screen dashboard replaces the camera window, and nothing goes to W&B. Results: `logs/demo/` (`results.csv` and a folder per run).
+
+**Before the demo:**
+
+1. Activate the environment and source the workspace (`micromamba activate rwr_jazzy`, `source install/setup.zsh`), and run everything from the repository root.
+2. Download the models: `python experiments/rl_inference/download_policies.py`.
+3. Extero and optional: the camera is plugged in (USB 3) and calibrated where it stands now (`apriltag_calibration.py`, as in step 1 of [the extero policies](#exteroceptive-policies-with-the-cube-pose)); the file is `camera.calibration` in the config.
+4. Rehearse without hardware with `--mock`, then run the pre-flight check with `--dry-run` (policy loads and fits the mode, calibration present; the hand does not move).
+
+**The config.** Everything a demo uses is in [experiments/cfgs/demo.yaml](experiments/cfgs/demo.yaml) (`--config` another file). The defaults are the best measured runs on the real hand (servo acc 0, action alpha 0.5, 2 rad/s):
+
+```yaml
+common:   {duration_s: 60, repeats: 3, start_temp_c: 38.0, out: logs/demo, rviz: false, torch_threads: 1}
+camera:   {calibration: ~/camera_extrinsics.npy, hand_to_tag: [0.0, -0.04, 0.423, 60.0, 0.0, 0.0]}
+proprio:  {model: models_proprio/rooster_new_policy.pt, servo_acc: 0, action_alpha: 0.5, speed: 2.0}
+extero:   {model: models_extero/extero_ibex_aramp05_acc250_policy.pt, servo_acc: 0, action_alpha: 0.5, speed: 2.0}
+optional:
+  task: axes                                 # axes | goals (--task overrides)
+  axes:  {model: models_proprio/lemur_policy.pt, action_alpha: 0.2, speed: null, axes: [x, y, z]}
+  goals: {model: models_proprio/manta_policy.pt, action_alpha: 0.2, goal_tolerance: 0.4}
+```
+
+- `model`: the policy file; `action_alpha` must be its training value (its `.json`).
+- `servo_acc`: the servo ramp (raw ACC register, 0 = no ramp, max 254; `null`: `config.yaml`'s). Passed to the hand controller as the ROS parameter `hand_controller/servo_acceleration_raw`, which overrides `servo_acceleration_raw` of `config.yaml` for that session (`eval_policies.py` has the same as `--servo-acc`).
+- `speed`: commanded spin speed in rad/s (sign = direction); `null` in `axes`: the top of the model's training range about each axis.
+- `duration_s`, `repeats`: policy time per run and runs per demo (`axes`: one run per entry of `axes` instead).
+
+**Run:**
+
+```bash
+python experiments/rl_inference/demo.py --mode proprio                 # no camera
+python experiments/rl_inference/demo.py --mode extero                  # camera plugged in
+python experiments/rl_inference/demo.py --mode optional --task axes    # or --task goals (default: optional.task)
+python experiments/rl_inference/demo.py --mode extero --dry-run        # only the pre-flight check
+python experiments/rl_inference/demo.py --mode extero --mock           # rehearsal: fake hand, drawn cube
+python experiments/rl_inference/demo.py --mode proprio --windowed      # dashboard in a window, not full screen
+```
+
+**During the demo.** Each run: the hand parks at the start pose, waits until the motors are cool, then for SPACE (cube in the palm), counts down, runs 60 s and parks again.
+
+| Key | Action |
+|---|---|
+| SPACE | start / continue |
+| P | pause: hand to the start pose, torque off (to put the cube back) |
+| E | emergency stop: torque off where the hand is |
+| N | next run |
+| Q | quit |
+| F | full screen on/off |
+
+Ctrl+C in the terminal stops everything with the torque off. The dashboard shows, per mode:
+
+- proprio: the digital twin, joint angle bars, motor temperatures and currents, and the control-loop rate;
+- extero: the camera view with turns and speed;
+- optional/axes: the commanded axis of each run; optional/goals: the angle to the goal and the goals reached.
+
+**Performance tips:**
+
+- Start cool: let the motors get below `start_temp_c` between demos rather than raising it.
+- Keep `torch_threads: 1`, `rviz: false` (the dashboard has the twin); W&B is always off.
+- On macOS, `caffeinate` runs automatically (no sleep, no App Nap); keep the laptop on power.
+- Watch the dashboard's control-loop rate: it should stay at about 20 Hz.
+- Camera on a USB 3 port.
+
 ## Imitation learning
 
 The hand follows the Rokoko glove through the retargeter, and the Franka arm follows the glove's wrist. The Franka arm controller is not part of this repository: it subscribes to `/right/arm/end_effector_pose_cmd` and publishes `/right/arm/end_effector_pose`.

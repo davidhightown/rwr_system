@@ -157,12 +157,15 @@ class HandLink:
         self.status_or = np.zeros(len(joint_ids), dtype=np.int64)  # servo status bits seen since reset_health()
         self.min_voltage = float("inf")
         self.policy, self.policy_on = None, False
+        self.deadline = None    # policy time at which the policy loop stops by itself (None: never)
         self.last_command = None
         self.clock = None       # callable: the run's policy time, for the joint log
         self.joint_log = []     # (policy time, command, measured, current) while the policy runs
         self.cube = CubePose(cube_pose_timeout)  # the cube pose for policies of the extero task
         self.cube_log = []      # (policy time, cube pose observation) while such a policy runs
         self.goal_log = []      # policy time of every goal orientation reached (--mode goals)
+        self.step_times = deque(maxlen=2 * int(POLICY_HZ))  # wall times of the last policy steps (loop rate)
+        self.infer_ms = deque(maxlen=2 * int(POLICY_HZ))    # their computation times
         self.torque_on = None
 
         self.node = Node("cube_spin_evaluation")
@@ -213,12 +216,18 @@ class HandLink:
         with self.lock:
             if not self.policy_on or self.q is None or self.qd is None:
                 return
+            if self.deadline is not None and self.clock is not None and self.clock() >= self.deadline:
+                self.policy_on = False  # the run's time is up, even if the main loop is late
+                return
             cube = self.cube.observation(time.time()) if self.policy.use_cube_pose else None
             goals = self.policy.goals
             reached = goals.reached if goals is not None else 0
+            t_step = time.perf_counter()
             out = self.policy.step(self.q, self.qd, cube)
             if out is None:
                 return
+            self.infer_ms.append((time.perf_counter() - t_step) * 1000.0)
+            self.step_times.append(t_step)
             if cube is not None and self.clock is not None:
                 self.cube_log.append((self.clock(), cube))
             if goals is not None and goals.reached > reached and self.clock is not None:
@@ -233,6 +242,16 @@ class HandLink:
     # -- from the main thread
     def joints_age(self):
         return time.time() - self.q_time if self.q_time else float("inf")
+
+    def loop_stats(self):
+        """The policy loop of the last 2 s: dict(hz, jitter_ms = std of the step intervals, infer_ms = mean step
+        computation), or None while it does not run."""
+        with self.lock:
+            times, infer = np.array(self.step_times), np.array(self.infer_ms)
+        if len(times) < 3 or time.perf_counter() - times[-1] > 0.5:
+            return None
+        dt = np.diff(times)
+        return dict(hz=float(1.0 / np.mean(dt)), jitter_ms=float(np.std(dt) * 1000.0), infer_ms=float(np.mean(infer)))
 
     def temperatures(self, max_age=5.0):
         """Filtered motor temperatures in joint order, or None without a recent reading."""
@@ -251,13 +270,17 @@ class HandLink:
             self.min_voltage = float("inf")
             self.temp_filter.glitches = 0
 
-    def start_policy(self, policy, clock):
-        """Torque on at the present pose, then the policy takes over, starting as after a reset in the task."""
+    def start_policy(self, policy, clock, deadline=None):
+        """Torque on at the present pose, then the policy takes over, starting as after a reset in the task, until
+        stop_policy() or (deadline) the policy time ``clock()`` reaches deadline."""
         self.set_torque(True)
         with self.lock:
             policy.reset()
             self.cube.restart()  # the tracker's filters start again, as at a reset in the task
             self.policy, self.clock, self.last_command, self.policy_on = policy, clock, None, True
+            self.deadline = deadline
+            self.step_times.clear()  # the loop rate of this stretch only
+            self.infer_ms.clear()
 
     def stop_policy(self):
         with self.lock:
@@ -342,7 +365,8 @@ class Evaluation:
         a = self.args
         config = dict(mock=a.mock, mock_drop_after=a.mock_drop_after, exposure_us=a.exposure_us, iso=a.iso,
                       camera_id=a.camera_id, detector_ckpt=str(a.detector), device=a.device, cube_edge=a.cube_edge,
-                      window=not a.no_window)
+                      window=not a.no_window, camera=getattr(a, "camera", True),  # demo.py: no camera, a dashboard
+                      dashboard=getattr(a, "dashboard", False), fullscreen=getattr(a, "fullscreen", False))
         self.vision_process = ctx.Process(target=vision.run, args=(config, self.status_q, self.events_q, self.vision_stop,
                                                                    self.twin_image_q), daemon=True)
         self.vision_process.start()
@@ -357,6 +381,9 @@ class Evaluation:
                 raise RuntimeError("the camera process stopped")
             time.sleep(0.05)
         i = self.camera_info
+        if i["camera"] == "none":
+            print("  no camera: only the window")
+            return
         print(f"  {i['camera']} {i['camera_id']} (USB {i['usb']}), detector on {i['detector_device']}")
         if "HIGH" in i["usb"] or "FULL" in i["usb"] or "LOW" in i["usb"]:
             print("  WARNING: the camera is on a slow USB connection; use a USB 3 port and cable")
@@ -381,10 +408,11 @@ class Evaluation:
                 state_q, self.twin_image_q, self.twin_render_stop, self.joint_ids, self.args.cube_edge))
             self.twin_render_process.start()
         self.twin = Twin(self.joint_ids, np.deg2rad(self.start_pose), self.args.cube_edge, self.args.cube_pose_timeout,
-                         self.out / "node_logs", panel_q=state_q)
-        self.twin.start()
-        print("Starting the digital twin (RViz" + (" and in the video" if state_q is not None else "") +
-              "): the hand as measured, the cube as the policy sees it.")
+                         self.out / "node_logs", panel_q=state_q, cube=getattr(self.args, "camera", True))
+        self.twin.start(rviz=self.args.rviz)
+        print("Starting the digital twin (" + ", ".join(w for w, on in (("RViz", self.args.rviz),
+                                                                         ("in the video", state_q is not None)) if on)
+              + "): the hand as measured, the cube as the policy sees it.")
 
     def start_hand(self):
         self.init_ros()
@@ -400,7 +428,8 @@ class Evaluation:
                 params.write_text(yaml.safe_dump({"/**": {"ros__parameters": {
                     "hand_controller/hand_name": "orca_v2", "hand_controller/hand_chirality": "right",
                     "hand_controller/hand_cfg_name": "orcahand_v2", "hand_controller/calibrate": False,
-                    "hand_controller/compliant_test_mode": False, "hand_controller/torque_off_on_exit": True}}}))
+                    "hand_controller/compliant_test_mode": False, "hand_controller/torque_off_on_exit": True,
+                    "hand_controller/servo_acceleration_raw": -1 if a.servo_acc is None else int(a.servo_acc)}}}))
                 cmd = [sys.executable, str(HAND_NODE), "--ros-args", "-r", "__ns:=/right", "--params-file", str(params)]
                 print("Starting the hand controller: THE HAND MOVES to its neutral pose, then to the start pose.")
             self.hand_log = open(log_dir / "hand_controller.log", "a")
@@ -514,9 +543,14 @@ class Evaluation:
             self.status["temps"] = None if temps is None else temps.tolist()
             if self.run is not None:
                 self.status.update(self.run.figures())
+            self.status.update(self.extra_status())
             self.status_q.put(dict(self.status))
         if sleep:
             time.sleep(sleep)
+
+    def extra_status(self):
+        """More for the view's status (demo.py: its dashboard's)."""
+        return {}
 
     def key(self):
         """The next key pressed in the window ("" if none); q and n end the session or the policy."""
@@ -749,7 +783,7 @@ class Evaluation:
                     pass
 
     def finish(self, run):
-        """Park the hand, close the video and write the run's files and its row in results.csv."""
+        """Park the hand, close the video and write the run's files and its row in results.csv (returned)."""
         self.show(f"finished: {run.outcome}", "white")
         end_temps = self.hand.temperatures()
         try:
@@ -784,6 +818,7 @@ class Evaluation:
         print(f"  files in {run.run_dir}")
         if self.args.wandb:
             self.upload(run.run_dir, row["outcome"])
+        return row
 
     def upload(self, run_dir, outcome):
         """The run to W&B in a background process (log: node_logs/wandb_upload.log), so the next run can start."""
@@ -1138,6 +1173,8 @@ def parse_args(argv=None):
     p.add_argument("--note", default="", help="Free text saved with every run (cube, setup, what changed).")
     p.add_argument("--start-wrist-deg", type=float, help="Wrist angle of the start pose (default: flexed, 2 deg "
                    "before the end of its range in config.yaml).")
+    p.add_argument("--servo-acc", type=int, help="Servo acceleration ramp (raw ACC register, 0..254) instead of "
+                   "servo_acceleration_raw in the hand's config.yaml; the simulation was fit to the config's value.")
     p.add_argument("--temp-limit", type=float, default=65.0, help="Pause the run when a motor reaches this (deg C).")
     p.add_argument("--temp-margin", type=float, default=2.0, help="Start only if every motor is expected to stay "
                    "this far below the limit.")
@@ -1166,6 +1203,8 @@ def parse_args(argv=None):
     p.add_argument("--twin", action=argparse.BooleanOptionalAction, default=None, help="A digital twin in RViz and "
                    "in the video's top right corner: the hand model as measured and the cube as a policy with the "
                    "cube pose sees it, in the simulation's frame. Default: on with --calibration.")
+    p.add_argument("--rviz", action=argparse.BooleanOptionalAction, default=True, help="With the twin: also its RViz "
+                   "window (--no-rviz: only in the video).")
     p.add_argument("--detector", type=Path, default=DEFAULT_CKPT, help="Checkpoint of the cube detector.")
     p.add_argument("--device", default="auto", help="Detector device: auto (cuda, then mps, then cpu), cuda, mps, cpu.")
     p.add_argument("--no-window", action="store_true", help="No live window (then there are no keys either).")

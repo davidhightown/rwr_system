@@ -53,7 +53,7 @@ def hand_urdf():
 class Twin:
     """rclpy must be initialised. joint_ids: the hand driver's joint order; start_pose_rad: shown without joint angles."""
 
-    def __init__(self, joint_ids, start_pose_rad, cube_edge, cube_pose_timeout, log_dir, panel_q=None):
+    def __init__(self, joint_ids, start_pose_rad, cube_edge, cube_pose_timeout, log_dir, panel_q=None, cube=True):
         from cube_spin_policy import OBS_T_HAND, CubePose
         from geometry_msgs.msg import TransformStamped
         from rclpy.executors import SingleThreadedExecutor
@@ -73,6 +73,7 @@ class Twin:
         self.goal, self.goal_error = None, None  # the goal orientation (w x y z) and rad to it (--mode goals), or None
         self.log_dir = Path(log_dir)
         self.panel_q = panel_q  # the state for twin_render (the twin in the video), or None
+        self.show_cube = cube  # False: no camera, no cube status line (demo.py's proprioceptive demo)
         self.processes = []
 
         self.node = Node("cube_eval_twin")
@@ -95,8 +96,8 @@ class Twin:
         self.executor.add_node(self.node)
         threading.Thread(target=self.executor.spin, daemon=True).start()
 
-    def start(self):
-        """Start robot_state_publisher and RViz; their output goes to twin.log in log_dir."""
+    def start(self, rviz=True):
+        """Start robot_state_publisher and RViz (rviz=False: not RViz); their output goes to twin.log in log_dir."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         params = self.log_dir / "twin_params.yaml"
         params.write_text(yaml.safe_dump({"/**": {"ros__parameters": {"robot_description": hand_urdf()}}}))
@@ -105,7 +106,7 @@ class Twin:
             ["ros2", "run", "robot_state_publisher", "robot_state_publisher", "--ros-args",
              "-r", "__ns:=/right/hand", "-r", "__node:=twin_state_publisher", "--params-file", str(params)],
             ["ros2", "run", "rviz2", "rviz2", "-d", str(RVIZ_CONFIG), "--ros-args", "-r", "__node:=twin_rviz"],
-        ):
+        )[:2 if rviz else 1]:
             log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)}\n")
             log.flush()
             # a session of its own: Ctrl+C in the terminal reaches only eval_policies.py, which then stops it
@@ -163,7 +164,7 @@ class Twin:
             goal_error = self.goal_error
         q = np.where(np.isfinite(q), q, self.start_pose)
         tracked = age <= timeout
-        lines = self._status_lines(pos is not None, tracked, age, measured)
+        lines = self._status_lines(pos is not None, tracked, age, measured)[0 if self.show_cube else 1:]
         if goal is not None:
             lines.append("goal orientation: the cube marked goal" + (
                 "" if goal_error is None else f", {np.degrees(goal_error):.0f} deg away"))

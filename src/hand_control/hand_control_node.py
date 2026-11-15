@@ -40,6 +40,9 @@ class HandControllerNode(Node):
         elif self.hand_name == "orca_v2":
             self.declare_parameter('hand_controller/hand_cfg_name', 'orcahand_v2')
             hand_cfg_name = self.get_parameter('hand_controller/hand_cfg_name').value
+            # servo acceleration ramp (raw ACC register) instead of config.yaml's servo_acceleration_raw; -1: the config's
+            self.declare_parameter('hand_controller/servo_acceleration_raw', -1)
+            acceleration_raw = self.get_parameter('hand_controller/servo_acceleration_raw').value
 
             config_dir_path = os.path.join(
                 get_package_share_directory("hand_control"),
@@ -61,7 +64,8 @@ class HandControllerNode(Node):
 
             from faive_system.src.hand_control.orca.hand_controller_v2 import OrcaHandV2
             # orca_core requires the file name config.yaml; calibration.yaml is stored next to it
-            self._hc = OrcaHandV2(os.path.join(config_dir_path, self.chirality, "config.yaml"))
+            self._hc = OrcaHandV2(os.path.join(config_dir_path, self.chirality, "config.yaml"),
+                                  acceleration_raw=None if acceleration_raw < 0 else int(acceleration_raw))
             self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode)
             self.get_logger().info(
                 f"Servo acceleration {self._hc.servo_profile['servo_acceleration_raw']} (raw) on every motor; "

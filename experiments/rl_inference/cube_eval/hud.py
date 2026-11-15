@@ -62,9 +62,11 @@ def picture_in_picture(frame, panel, margin=8):
     return frame
 
 
-def render(image, status, detection, trail, K, dist=None, cube_edge=0.045, detection_age=None, detection_hz=0.0):
+def render(image, status, detection, trail, K, dist=None, cube_edge=0.045, detection_age=None, detection_hz=0.0,
+           panel=True):
     """image: BGR. detection: (R, t, corner pixels) of the last detection or None. trail: [(x, y)] pixels of the cube
-    centre, oldest first. Returns a new image."""
+    centre, oldest first. panel=False: only the cube and its path, without the figures and the banner (demo.py's
+    dashboard shows them). Returns a new image."""
     frame = image.copy()
     h, w = frame.shape[:2]
 
@@ -98,6 +100,8 @@ def render(image, status, detection, trail, K, dist=None, cube_edge=0.045, detec
             for i, c in enumerate([(0, 0, 255), (0, 200, 0), (255, 80, 0)]):  # x red, y green, z blue
                 cv2.line(frame, tuple(axes[0].astype(int)), tuple(axes[i + 1].astype(int)), c, 2, cv2.LINE_AA)
 
+    if not panel:
+        return frame
     lines = status_lines(status)
     if fresh:
         lines.append((f"cube tracked, {detection_hz:.1f} poses/s", GREEN if detection_age < 0.5 else ORANGE))
