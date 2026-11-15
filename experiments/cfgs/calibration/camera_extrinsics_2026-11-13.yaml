@@ -1,0 +1,27 @@
+# Camera calibration of the extero evaluation setup, made 2026-11-12 23:42 and used for all extero evaluations on
+# 2026-11-13: OAK-D-S2 1944301041E91D1300 (bottom_view) looking down at the palm, AprilTag tag36h11 ID 9 lying flat on
+# the table beyond the fingertips. The tag's black square is 0.08 m (measured; camera_extrinsics_2026-11-12 assumed
+# 0.075 m, which puts the tag 6 % too close to the camera: 0.463 instead of 0.494 m).
+#
+#   python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+#       --calibration experiments/cfgs/calibration/camera_extrinsics_2026-11-13.npy
+#
+# (--hand-to-tag defaults to the values below, the defaults of cube_spin_v2.launch.py.)
+# Valid only while the camera and the tag stay where they were; recalibrate after moving either.
+
+# camera_extrinsics_2026-11-13.npy (apriltag_calibration.py --tag-id 9 --tag-size 0.08, 30 samples, std 0.14 mm):
+# the tag in the camera frame
+cam_T_tag:
+  - [-0.99995, 0.00917, 0.00424, 0.00318]
+  - [-0.00934, -0.99905, -0.04255, -0.11885]
+  - [0.00385, -0.04259, 0.99909, 0.49401]
+  - [0.00000, 0.00000, 0.00000, 1.00000]
+
+# --hand-to-tag: the tag's pose from the mount (centre of the forearm's flat end face; x towards the little finger,
+# y out of the palm, z along the forearm towards the fingertips), m and deg (intrinsic XYZ).
+# Measured with a ruler: the tag centre is 400 mm (horizontal) from the stand, the stand's top edge 262 mm above the
+# table; the mount is 30 mm in from that edge and 28 mm down a plate tilted 30 deg towards the tag (forearm 30 deg below
+# horizontal, palm up, as in the simulation). Yaw: the tag's x axis points to the left seen from the stand (checked with
+# show_tag_axes.py). y corrected from the measured -0.042 to -0.040: with -0.042 the detected cube sat ~2 mm inside the
+# palm in RViz. Check: the cube resting in the palm is printed by --camera-only at about (-0.01, -0.01, -0.04).
+hand_to_tag: [0.0, -0.040, 0.423, 60.0, 0.0, 0.0]

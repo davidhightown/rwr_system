@@ -31,8 +31,13 @@ def status_lines(s):
     lines = [(s.get("model", ""), WHITE), (s.get("phase", ""), COLORS.get(s.get("phase_color", "yellow"), YELLOW))]
     if s.get("duration"):
         lines.append((f"time {s.get('elapsed', 0.0):5.1f} / {s['duration']:.0f} s    drops {s.get('drops', 0)}", WHITE))
-        lines.append((f"turns {s.get('turns', 0.0):+6.2f}    speed (5 s) {s.get('speed', 0.0):+5.2f} rad/s    "
-                      f"goal {s.get('goal', 0.0):+.1f}", YELLOW))
+        if s.get("goals") is not None:
+            error = s.get("goal_error_deg")
+            lines.append((f"goals {s['goals']}    before the first drop {s.get('goals_before_drop', 0)}    "
+                          f"to the goal {'-' if error is None else f'{error:.0f} deg'}", YELLOW))
+        else:
+            lines.append((f"turns {s.get('turns', 0.0):+6.2f}    speed (5 s) {s.get('speed', 0.0):+5.2f} rad/s    "
+                          f"goal {s.get('goal', 0.0):+.1f}", YELLOW))
     temps = s.get("temps")
     if temps is not None and len(temps) and np.any(np.isfinite(temps)):
         temps = np.asarray(temps, dtype=float)
@@ -48,9 +53,20 @@ def status_lines(s):
     return lines
 
 
-def render(image, status, detection, trail, K, dist=None, cube_edge=0.045, detection_age=None, detection_hz=0.0):
+def picture_in_picture(frame, panel, margin=8):
+    """panel pasted into the top right corner of frame (in place, cut to fit)."""
+    h, w = frame.shape[:2]
+    ph, pw = min(panel.shape[0], h - 2 * margin), min(panel.shape[1], w - 2 * margin)
+    if ph > 0 and pw > 0:
+        frame[margin:margin + ph, w - margin - pw:w - margin] = panel[:ph, :pw]
+    return frame
+
+
+def render(image, status, detection, trail, K, dist=None, cube_edge=0.045, detection_age=None, detection_hz=0.0,
+           panel=True):
     """image: BGR. detection: (R, t, corner pixels) of the last detection or None. trail: [(x, y)] pixels of the cube
-    centre, oldest first. Returns a new image."""
+    centre, oldest first. panel=False: only the cube and its path, without the figures and the banner (demo.py's
+    dashboard shows them). Returns a new image."""
     frame = image.copy()
     h, w = frame.shape[:2]
 
@@ -84,6 +100,8 @@ def render(image, status, detection, trail, K, dist=None, cube_edge=0.045, detec
             for i, c in enumerate([(0, 0, 255), (0, 200, 0), (255, 80, 0)]):  # x red, y green, z blue
                 cv2.line(frame, tuple(axes[0].astype(int)), tuple(axes[i + 1].astype(int)), c, 2, cv2.LINE_AA)
 
+    if not panel:
+        return frame
     lines = status_lines(status)
     if fresh:
         lines.append((f"cube tracked, {detection_hz:.1f} poses/s", GREEN if detection_age < 0.5 else ORANGE))

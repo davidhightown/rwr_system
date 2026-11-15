@@ -33,6 +33,24 @@ def pick_device(name="auto"):
     return torch.device("cpu")
 
 
+def nms_on_cpu():
+    """torchvision::nms has no MPS kernel. Mask R-CNN calls torchvision.ops.boxes.nms, and
+    PyTorch's own CPU fallback prints a warning on every detection. Copy to the CPU here instead."""
+    import torchvision.ops.boxes as box_ops
+
+    if getattr(box_ops.nms, "_runs_on_cpu", False):
+        return
+    orig = box_ops.nms
+
+    def nms(boxes, scores, iou_threshold):
+        if boxes.device.type != "mps":
+            return orig(boxes, scores, iou_threshold)
+        return orig(boxes.cpu(), scores.cpu(), iou_threshold).to(boxes.device)
+
+    nms._runs_on_cpu = True
+    box_ops.nms = nms
+
+
 class CubePoseEstimator:
     def __init__(self, ckpt=DEFAULT_CKPT, cube_edge=0.045, device="auto", min_score=0.3, crop=None):
         # Apple Silicon: Mask R-CNN's nms has no MPS implementation, run it on the CPU. Before importing torch.
@@ -45,6 +63,8 @@ class CubePoseEstimator:
             raise FileNotFoundError(f"{ckpt} not found: run experiments/rl_inference/pose_estimation/download_models.sh")
         self.torch = torch
         self.device = pick_device(device)
+        if self.device.type == "mps":
+            nms_on_cpu()
         self.model = maskrcnn_detection.load_from_checkpoint(str(ckpt), map_location="cpu").to(self.device).eval()
         self.model_points = cube_corners(cube_edge)
         self.min_score = min_score

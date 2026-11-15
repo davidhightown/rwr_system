@@ -32,6 +32,7 @@ install(PROGRAMS
   keyboard_runner.py
   run_keyboard_teleop_franka.py
   rl_inference/cube_detection_node.py
+  rl_inference/camera_overlay.py
   rl_inference/policy_inference_cube_spin_v2.py
   rl_inference/cube_spin_policy.py
   rl_inference/eval_policies.py

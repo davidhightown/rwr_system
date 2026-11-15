@@ -9,6 +9,9 @@ delay the 20 Hz policy loop, and so that the window has a main thread (macOS nee
 
 The camera is read directly with depthai (the OAK's own exposure, focus and IMU are then available); --mock
 replaces camera and detector with a drawn cube that turns while the policy runs.
+
+demo.py uses the same process with config camera=False (no camera and no detector: only the window and its keys) and
+dashboard=True (the full-screen dashboard of cube_eval/dashboard.py around the camera view instead of the view alone).
 """
 
 import queue
@@ -21,9 +24,12 @@ import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from .hud import project, render
+from .hud import picture_in_picture, project, render
 
 WINDOW = "cube spin evaluation"
+DASHBOARD_WINDOW = "ORCA hand demo"
+DASHBOARD_HZ = 20.0   # the dashboard is drawn at most this often (the camera runs at 30 fps)
+TWIN_MAX_AGE_S = 1.0  # an older twin panel is left out rather than shown frozen
 
 
 class OakCamera:
@@ -178,29 +184,35 @@ class Recorder:
         self._thread.join(timeout=10)
 
 
-def run(config, status_q, events_q, stop):
+def run(config, status_q, events_q, stop, twin_q=None):
     """The process: config is a dict (mock, mock_drop_after, exposure_us, iso, camera_id, detector_ckpt, device,
-    cube_edge, window, trail_s)."""
+    cube_edge, window, trail_s, camera, dashboard, fullscreen). twin_q: (time, BGR panel) of the digital twin (twin_render), pasted into the frame."""
     # Ctrl+C in the terminal also reaches this process: ignore it, so that the video is closed properly when the
     # main process asks this one to stop
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
-        _run(config, status_q, events_q, stop)
+        _run(config, status_q, events_q, stop, twin_q)
     except Exception as e:  # the main process decides what to do
         import traceback
         events_q.put(("error", f"{type(e).__name__}: {e}\n{traceback.format_exc()}"))
 
 
-def _run(config, status_q, events_q, stop):
-    if config.get("mock"):
+def _run(config, status_q, events_q, stop, twin_q=None):
+    if not config.get("camera", True):  # only the window (demo.py's proprioceptive demo: no camera plugged in)
+        camera = detector = None
+        K = dist = None
+        events_q.put(("ready", dict(camera="none", camera_id="-", usb="-", exposure_us=0, iso=0, K=None,
+                                    detector_device="-")))
+    elif config.get("mock"):
         camera = MockCamera(drop_after=config.get("mock_drop_after"))
         detector = camera
     else:
         from .detector import CubePoseEstimator
         detector = CubePoseEstimator(config["detector_ckpt"], config.get("cube_edge", 0.045), config.get("device", "auto"))
         camera = OakCamera(config.get("exposure_us", 5000), config.get("iso", 400), camera_id=config.get("camera_id", ""))
-    K, dist = camera.K, camera.dist
-    events_q.put(("ready", dict(camera.info, K=K.tolist(), detector_device=str(getattr(detector, "device", "mock")))))
+    if camera is not None:
+        K, dist = camera.K, camera.dist
+        events_q.put(("ready", dict(camera.info, K=K.tolist(), detector_device=str(getattr(detector, "device", "mock")))))
 
     lock = threading.Lock()
     shared = dict(image=None, image_time=0.0, image_id=0, detection=None, detection_time=None)
@@ -229,14 +241,26 @@ def _run(config, status_q, events_q, stop):
                     trail.append((stamp, pixel))
             events_q.put(("det", stamp, t.tolist(), Rotation.from_matrix(R).as_quat().tolist(), pixel))
 
-    threading.Thread(target=detect_loop, daemon=True).start()
+    if detector is not None:
+        threading.Thread(target=detect_loop, daemon=True).start()
 
     show = config.get("window", True)
+    dashboard, window, last_dashboard = None, WINDOW, 0.0
+    if config.get("dashboard"):
+        from .dashboard import Dashboard
+        dashboard, window = Dashboard(), DASHBOARD_WINDOW
+    fullscreen = bool(config.get("fullscreen")) and dashboard is not None
     if show:
-        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, 960, 540)
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+        if dashboard is not None:
+            cv2.resizeWindow(window, 1600, 900)
+            if fullscreen:
+                cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+        else:
+            cv2.resizeWindow(window, 960, 540)
     status, recorder, record_path, trail_id = {}, None, None, None
     last_imu = 0.0
+    twin_time, twin_panel = 0.0, None
     while not stop.is_set():
         try:
             while True:
@@ -245,26 +269,48 @@ def _run(config, status_q, events_q, stop):
             pass
         if status.get("quit"):
             break
-        if config.get("mock"):
+        if config.get("mock") and camera is not None:
             camera.status = status
-        image = camera.read()
-        now = time.time()
-        if image is None:
-            time.sleep(0.002)
-            continue
-        with lock:
-            shared["image"], shared["image_time"] = image, now
-            shared["image_id"] += 1
-            detection, detection_time = shared["detection"], shared["detection_time"]
-            if status.get("trail_id") != trail_id:  # a new run: the path starts anew
-                trail_id = status.get("trail_id")
-                trail.clear()
-            while trail and trail[0][0] < now - config.get("trail_s", 8.0):
-                trail.popleft()
-            pixels = [p for _, p in trail]
-            hz = sum(1 for t in detection_times if now - t <= 2.0) / 2.0
-        frame = render(image, status, detection, pixels, K, dist, config.get("cube_edge", 0.045),
-                       None if detection_time is None else now - detection_time, hz)
+        if camera is None:
+            time.sleep(1.0 / DASHBOARD_HZ)
+            image, now = None, time.time()
+        else:
+            image = camera.read()
+            now = time.time()
+            if image is None:
+                time.sleep(0.002)
+                continue
+        frame, view, hz = None, None, 0.0
+        if image is not None:
+            with lock:
+                shared["image"], shared["image_time"] = image, now
+                shared["image_id"] += 1
+                detection, detection_time = shared["detection"], shared["detection_time"]
+                if status.get("trail_id") != trail_id:  # a new run: the path starts anew
+                    trail_id = status.get("trail_id")
+                    trail.clear()
+                while trail and trail[0][0] < now - config.get("trail_s", 8.0):
+                    trail.popleft()
+                pixels = [p for _, p in trail]
+                hz = sum(1 for t in detection_times if now - t <= 2.0) / 2.0
+            age = None if detection_time is None else now - detection_time
+            frame = render(image, status, detection, pixels, K, dist, config.get("cube_edge", 0.045), age, hz)
+            if dashboard is not None:  # the dashboard has the figures: the camera view without them
+                view = render(image, status, detection, pixels, K, dist, config.get("cube_edge", 0.045), age, hz,
+                              panel=False)
+        fresh_twin = None
+        if twin_q is not None:
+            try:
+                while True:
+                    twin_time, twin_panel = twin_q.get_nowait()
+            except queue.Empty:
+                pass
+            if twin_panel is not None and now - twin_time < TWIN_MAX_AGE_S:
+                fresh_twin = twin_panel
+                if frame is not None:
+                    picture_in_picture(frame, twin_panel)
+                if view is not None:
+                    picture_in_picture(view, twin_panel)
 
         path = status.get("record")
         if path != record_path:
@@ -274,22 +320,34 @@ def _run(config, status_q, events_q, stop):
                     events_q.put(("error", f"could not write the video {record_path}"))
             recorder = Recorder(path) if path else None
             record_path = path
-        if recorder is not None:
+        if recorder is not None and frame is not None:
             recorder.pause(not status.get("record_on", True))
             recorder.write(frame)
 
         if show:
-            cv2.imshow(WINDOW, frame)
+            if dashboard is None:
+                cv2.imshow(window, frame)
+            elif now - last_dashboard >= 1.0 / DASHBOARD_HZ:
+                last_dashboard = now
+                if camera is not None:
+                    status.setdefault("demo", {})["detect_hz"] = hz
+                cv2.imshow(window, dashboard.render(status, view, None if view is not None else fresh_twin, now))
             key = cv2.waitKey(1) & 0xFF
             if key != 255:
-                events_q.put(("key", chr(key)))
-        if now - last_imu >= 1.0:
+                if chr(key) == "f" and dashboard is not None:  # full screen on / off, here only
+                    fullscreen = not fullscreen
+                    cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN,
+                                          cv2.WINDOW_FULLSCREEN if fullscreen else cv2.WINDOW_NORMAL)
+                else:
+                    events_q.put(("key", chr(key)))
+        if camera is not None and now - last_imu >= 1.0:
             last_imu = now
             acc = camera.acceleration()
             if acc is not None:
                 events_q.put(("imu", acc.tolist()))
     if recorder is not None:
         recorder.close()
-    camera.close()
+    if camera is not None:
+        camera.close()
     if show:
         cv2.destroyAllWindows()

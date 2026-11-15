@@ -27,44 +27,47 @@ The Python package is called `faive_system` (e.g. `from faive_system.src.common.
 
 1. Create the `src` folder of your ROS 2 workspace and clone the repository into it:
    ```bash
-      mkdir -p ~/ros_ws/src
-      cd ~/ros_ws/src
-      git clone https://github.com/srl-ethz/rwr_system.git
+       mkdir -p ~/ros_ws/src
+       cd ~/ros_ws/src
+       git clone https://github.com/srl-ethz/rwr_system.git
    ```
 2. Set up a ROS 2 Jazzy environment, e.g. with pixi following [Getting Started with RoboStack](https://robostack.github.io/GettingStarted.html). With pixi, prefix the commands below with `pixi run` and run them from `~/ros_ws`.
 3. Install the ROS dependencies:
    ```bash
-      pixi add pip ros-jazzy-rosidl-typesupport-c ros-jazzy-joint-state-publisher-gui ros-jazzy-xacro
-      pixi run which pip   # should print ~/ros_ws/.pixi/envs/default/bin/pip or similar
+       pixi add pip ros-jazzy-rosidl-typesupport-c ros-jazzy-joint-state-publisher-gui ros-jazzy-xacro
+       pixi run which pip   # should print ~/ros_ws/.pixi/envs/default/bin/pip or similar
    ```
-
-      If `which pip` prints another pip, comment out the conda/mamba setup in `~/.bashrc` or `~/.zshrc`.
+   ```
+   If `which pip` prints another pip, comment out the conda/mamba setup in `~/.bashrc` or `~/.zshrc`.
+   ```
 4. Install the Python dependencies:
    ```bash
-      pixi run pip install -e './src/rwr_system[all]'
-      # the ORCA v2 driver. --no-deps: orca_core asks for a newer numpy than this package pins, but works with it
-      pixi run pip install --no-deps orca_core==0.5.2
+       pixi run pip install -e './src/rwr_system[all]'
+       # the ORCA v2 driver. --no-deps: orca_core asks for a newer numpy than this package pins, but works with it
+       pixi run pip install --no-deps orca_core==0.5.2
    ```
 5. Build the workspace and source it:
    ```bash
-      cd ~/ros_ws
-      pixi run colcon build --symlink-install
-      source install/setup.bash
+       cd ~/ros_ws
+       pixi run colcon build --symlink-install
+       source install/setup.bash
    ```
+   ```
+   With pixi, add the source step to `~/ros_ws/pixi.toml` instead:
 
-      With pixi, add the source step to `~/ros_ws/pixi.toml` instead:
-
-      If the build fails after changes, remove `build/`, `install/` and `log/` and build again.
+   If the build fails after changes, remove `build/`, `install/` and `log/` and build again.
+   ```
 6. For the RL task, download the cube detector's model files once:
    ```bash
-      ./src/rwr_system/experiments/rl_inference/pose_estimation/download_models.sh
+       ./src/rwr_system/experiments/rl_inference/pose_estimation/download_models.sh
    ```
 7. For the real-hand evaluation's results on [W&B](https://wandb.ai) (project `rwr-skin/real_hand_eval`), log in once with your API key from [wandb.ai/authorize](https://wandb.ai/authorize). `wandb` comes with the `[all]` install of step 4:
    ```bash
-      pixi run wandb login
+       pixi run wandb login
    ```
-
-      You need to be a member of the `rwr-skin` team: `pixi run python -c "import wandb; print(wandb.Api().viewer.teams)"` should list it.
+   ```
+   You need to be a member of the `rwr-skin` team: `pixi run python -c "import wandb; print(wandb.Api().viewer.teams)"` should list it.
+   ```
 
 Run nodes with `ros2 run <package> <file>` and launch files with `ros2 launch <package> <launch file>`.
 
@@ -74,25 +77,26 @@ The commands to run the system are the same as on Linux; the code selects the pl
 
 1. Clone the repository as in step 1 above, then create the environment (ROS 2 Jazzy, PyTorch and the other dependencies) with [micromamba](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html):
    ```bash
-      cd ~/ros_ws/src/rwr_system
-      micromamba create -f environment-macos.yml
-      micromamba activate rwr_jazzy
-      pip install --no-deps -e .
+       cd ~/ros_ws/src/rwr_system
+       micromamba create -f environment-macos.yml
+       micromamba activate rwr_jazzy
+       pip install --no-deps -e .
    ```
 2. Build the workspace and source it. In zsh, use `setup.zsh`:
    ```bash
-      cd ~/ros_ws
-      colcon build --symlink-install --packages-select ingress hand_control viz experiments
-      source install/setup.zsh
+       cd ~/ros_ws
+       colcon build --symlink-install --packages-select ingress hand_control viz experiments
+       source install/setup.zsh
    ```
-
-      If the repository is not in `~/ros_ws/src`, add `--base-paths /path/to/rwr_system` to the build command. In each new terminal, run `micromamba activate rwr_jazzy` and the `source` line again.
+   ```
+   If the repository is not in `~/ros_ws/src`, add `--base-paths /path/to/rwr_system` to the build command. In each new terminal, run `micromamba activate rwr_jazzy` and the `source` line again.
+   ```
 3. For the RL task, download the cube detector's model files (step 6 above).
 4. For the real-hand evaluation's results on W&B, log in once (step 7 above). An environment created before `wandb` was added to `environment-macos.yml` needs it installed first:
    ```bash
-      micromamba activate rwr_jazzy
-      pip install wandb   # only for an older environment
-      wandb login
+       micromamba activate rwr_jazzy
+       pip install wandb   # only for an older environment
+       wandb login
    ```
 
 Differences to Linux:
@@ -112,44 +116,48 @@ Make sure that the servo wiring is correct before you connect the power: the ser
 
 1. **Tension the tendons.** The motors wind the tendons taut and then hold them under current. With the 3D-printed ratchet, turn the top spool of each servo clockwise until the tendon feels firm, and no further: too much tension makes joints stall before their end stops in calibration. Press Ctrl+C when done:
    ```bash
-      python src/hand_control/orca/tensioning_v2.py
+       python src/hand_control/orca/tensioning_v2.py
    ```
-
-      `Motor ID N has not been fully calibrated` for all motors is normal here: this script reads the source config folder, and the calibration is in `install/`. Tensioning does not use it.
+   ```
+   `Motor ID N has not been fully calibrated` for all motors is normal here: this script reads the source config folder, and the calibration is in `install/`. Tensioning does not use it.
+   ```
 2. **Calibrate the hand** once after tensioning. The joints move to their end stops, so keep your fingers clear:
    ```bash
-      ros2 launch hand_control orcahand_v2_controller_launch.yaml hand_chirality:=right calibrate:=true launch_rviz:=false
+       ros2 launch hand_control orcahand_v2_controller_launch.yaml hand_chirality:=right calibrate:=true launch_rviz:=false
    ```
+   ```
+   The result is saved as `calibration.yaml` next to the installed config, so deleting `install/` means calibrating again. When it is finished, press Ctrl+C and compare the measured motor travel of equivalent joints:
 
-      The result is saved as `calibration.yaml` next to the installed config, so deleting `install/` means calibrating again. When it is finished, press Ctrl+C and compare the measured motor travel of equivalent joints:
-
-      `calibrated: true` does not show that the result is good. A joint far below its neighbours stopped before its end stop (on our hand, the PIP joints measure about 90 to 100 degrees), see Troubleshooting in [experiments/README.md](experiments/README.md). Fix it and calibrate again before you continue.
+   `calibrated: true` does not show that the result is good. A joint far below its neighbours stopped before its end stop (on our hand, the PIP joints measure about 90 to 100 degrees), see Troubleshooting in [experiments/README.md](experiments/README.md). Fix it and calibrate again before you continue.
+   ```
 3. **Move each joint** with the sliders and check that it moves correctly and over its full range:
    ```bash
-      ros2 launch experiments orcahand_v2_joint_gui.launch.py
+       ros2 launch experiments orcahand_v2_joint_gui.launch.py
    ```
-
-      Then stop the GUI.
+   ```
+   Then stop the GUI.
+   ```
 4. **Record chirps for system identification.** The recorder uses `orca_core` directly, without ROS. Remove all loads from the hand and leave it room to move. See [experiments/orca/README.md](experiments/orca/README.md) for the details.
    ```bash
-      # show the plan without moving
-      python experiments/orca/chirp_all.py
+       # show the plan without moving
+       python experiments/orca/chirp_all.py
 
-      # test one joint with a small amplitude
-      python experiments/orca/chirp_all.py --joints index_mcp --amplitude-deg 3 --execute
+       # test one joint with a small amplitude
+       python experiments/orca/chirp_all.py --joints index_mcp --amplitude-deg 3 --execute
 
-      # record all 17 joints, about 6 minutes
-      python experiments/orca/chirp_all.py --execute
+       # record all 17 joints, about 6 minutes
+       python experiments/orca/chirp_all.py --execute
 
-      # optional: no ramp to each joint's first chirp sample
-      python experiments/orca/chirp_all.py --no-ramp --execute
+       # optional: no ramp to each joint's first chirp sample
+       python experiments/orca/chirp_all.py --no-ramp --execute
    ```
+   ```
+   With `--no-ramp`, each joint jumps to its first chirp sample at full motor speed, and the previous joint snaps back to neutral, so test it on one joint with a small amplitude first. The recorded sweep is the same, so the fit does not change.
 
-      With `--no-ramp`, each joint jumps to its first chirp sample at full motor speed, and the previous joint snaps back to neutral, so test it on one joint with a small amplitude first. The recorded sweep is the same, so the fit does not change.
+   **The default single-joint chirp** (the recorder's first version) is still `experiments/orca/chirp.py`: one joint (`index_mcp` by default, `--joints` for others), a logarithmic chirp from 0.1 to 5 Hz over 20 s, ±10° about the middle of the joint's range, commands at 20 Hz, the other joints at neutral, a ramp of about 1 s to the first sample and 1 s to settle:
 
-      **The default single-joint chirp** (the recorder's first version) is still `experiments/orca/chirp.py`: one joint (`index_mcp` by default, `--joints` for others), a logarithmic chirp from 0.1 to 5 Hz over 20 s, ±10° about the middle of the joint's range, commands at 20 Hz, the other joints at neutral, a ramp of about 1 s to the first sample and 1 s to settle:
-
-      It writes `logs/chirp_v2/<UTC time>/chirp_index_mcp_*.csv` (`timestamp`, `commanded_position`, `measured_position`: one row per command, the file the fit reads) and `metadata.json`. Since then it also does the following, none of which changes the sweep:
+   It writes `logs/chirp_v2/<UTC time>/chirp_index_mcp_*.csv` (`timestamp`, `commanded_position`, `measured_position`: one row per command, the file the fit reads) and `metadata.json`. Since then it also does the following, none of which changes the sweep:
+   ```
    - **Servo ramp:** after start-up it writes `servo_acceleration_raw` from `config.yaml` (150) to every motor and records it. This is the same value `orca_core` 0.5.2 writes by itself, so the motors behave as in the first version.
    - **Fast reads:** between commands it reads the joint at 100 Hz, as the deployment controller does, into `fast_*.csv` with the motor's velocity and current. `--read-hz 20` turns this off, so the bus carries exactly the first version's traffic.
    - **Abduction joints** (`*_abd`): the neighbouring fingers spread so they do not touch the swept finger, and the sweep centre may move off the middle of the range. `--abd-gap-deg 0` keeps them at neutral and the centre in the middle, as in the first version.
@@ -158,12 +166,13 @@ Make sure that the servo wiring is correct before you connect the power: the ser
       After the run, the script shows a table and `overview.png`, and asks whether the run was good. Answer `n` only if the run itself was disturbed (bumped, loaded, loose cable): a genuine outlier is still a good run, and it is what you want to measure. The answer goes into the folder name, so `ls -d logs/chirp_v2/*_good` lists the good runs. Press Enter to decide later and rename the folder yourself, and do not tag test runs as good. Each folder has the `config.yaml` and `calibration.yaml` of that run, and its name has the start time in UTC. `logs/chirp_v2/` is ignored by git, so copy the runs somewhere safe. See [experiments/orca/README.md](experiments/orca/README.md).
 5. **Fit the joint parameters** on the training computer, in the Python environment with Isaac Lab, from `scripts/motor_param_characterization` in `rwr_faive_lab`. Install the fit's packages once with `python -m pip install scikit-optimize pandas`. The simulator's joint names have the prefix `right_`:
    ```bash
-      for j in wrist thumb_cmc thumb_abd thumb_mcp thumb_dip middle_abd middle_mcp middle_pip; do
-        python optimization.py --joint_name right_$j --ground_truth <run_dir>/chirp_${j}_*.csv
-      done
+       for j in wrist thumb_cmc thumb_abd thumb_mcp thumb_dip middle_abd middle_mcp middle_pip; do
+         python optimization.py --joint_name right_$j --ground_truth <run_dir>/chirp_${j}_*.csv
+       done
    ```
-
-      The output shows the best parameters, and `logs/optimizations/<joint>_<timestamp>/frf_comparison.png` compares them with the real hand. If a best value is at the limit of its range, make the range larger in `optimization.py` and fit again. If you change the chirp on the real hand, also change it in `chirp_characterization.py`.
+   ```
+   The output shows the best parameters, and `logs/optimizations/<joint>_<timestamp>/frf_comparison.png` compares them with the real hand. If a best value is at the limit of its range, make the range larger in `optimization.py` and fit again. If you change the chirp on the real hand, also change it in `chirp_characterization.py`.
+   ```
 6. **Use the parameters.** Write them into `source/faive_lab/faive_lab/assets/orca_v2.py` in `rwr_faive_lab` (the values of the finger you fit also apply to the other three fingers), then train the policy again.
 
 If something fails, see Troubleshooting in [experiments/README.md](experiments/README.md).
@@ -178,26 +187,30 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
 
 `experiments/rl_inference/eval_policies.py` runs exported policies one after another on the hand for 60 s each, counts the cube's turns with the camera from above, and uploads the results to W&B. One command starts the hand controller, the camera and a live window; do not start them yourself. Details (start pose, drops, heat pauses, all result columns): [experiments/README.md](experiments/README.md#evaluate-policies-on-the-real-hand).
 
-1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio` or `rwr-skin/orca_extero`. This copies those not yet here to `models_proprio/<name>_policy.pt` and `models_extero/<name>_policy.pt` (with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit). Files already there are left alone. Both folders are git-ignored.
-   ```bash
-      python experiments/rl_inference/download_policies.py             # --dry-run: only list the new ones
-   ```
+The same script runs all three kinds of policies. It tells them apart by their input size and the training info in the `.json` next to each file, and sets aside every model it cannot run with the arguments given, naming the arguments that would run it (e.g. `not evaluated: a distilled student with an LSTM: try --mode student`).
 
-    The evaluation below uses `models_proprio/` only.
+| Policies | Trained in (W&B) | Saved to | Evaluate every untested one |
+|---|---|---|---|
+| [Proprioceptive](#proprioceptive-policies): spin about z, 74 observations | `rwr-skin/orca_proprio` | `models_proprio/` | `eval_policies.py` |
+| [Exteroceptive](#exteroceptive-policies-with-the-cube-pose): spin about z, 82 observations (the 74 and the cube pose) | `rwr-skin/orca_extero` | `models_extero/` | `eval_policies.py --models-dir models_extero --calibration CAM_T_TAG.npy` |
+| [Optional tasks](#optional-tasks-and-special-modes): all axes, goals; also students, history, other action alpha | `rwr-skin/orca_optional` (older ones in `orca_proprio`) | `models_proprio/` | `eval_policies.py --mode MODE` (+ `--calibration` for those with the cube pose) |
+
+Run every command from the repository root in a sourced terminal (`source ~/ros_ws/install/setup.zsh`, for the hand controller). Without model names, the script lists the models in `--models-dir` (default `models_proprio/`) with no run on W&B yet (none of the same file and none of the same name), and after Enter evaluates those it can run and uploads each run; `--dry-run` only prints the list. With model names (looked up in `--models-dir`; a path works too) it runs just those, and uploads them only with `--wandb`.
+
+#### Common steps
+
+1. **Download the new policies.** Training logs every exported policy as a W&B artifact in `rwr-skin/orca_proprio`, `rwr-skin/orca_extero` or `rwr-skin/orca_optional`. This copies those not yet here to `models_proprio/<name>_policy.pt` (proprio and optional) or `models_extero/<name>_policy.pt` (extero), with `<name>_policy.json` next to each: artifact, training run, checkpoint, commit, and what the training run used (action alpha, actor observations, history, commands, the axes reached by an axis curriculum). Files already there are left alone. Both folders are git-ignored.
+   ```bash
+   python experiments/rl_inference/download_policies.py                  # all three projects; --dry-run: only list the new ones
+   python experiments/rl_inference/download_policies.py --only optional  # one project: proprio, extero or optional
+   python experiments/rl_inference/download_policies.py --update-info    # add the training info to older .json files
+   ```
 2. **Check the setup** (the hand is calibrated, the camera looks down at the palm on a USB 3 port, the W&B login of the installation is done):
    ```bash
-      source ~/ros_ws/install/setup.zsh # source to get the handcontroller
-
-      python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
-      python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
+   python experiments/rl_inference/eval_policies.py --camera-only   # the cube is found; the hand is not started
+   python experiments/rl_inference/eval_policies.py --pose-only     # the hand goes to the start pose, torque off
    ```
-3. **Evaluate every untested model.** Without arguments the script lists the models in `models_proprio/` with no run on W&B yet (none of the same file and none of the same name), sets aside those it cannot run (teachers and history students, which take other observations than the 74 proprioceptive ones), and after Enter evaluates the rest and uploads each run:
-   ```bash
-      python experiments/rl_inference/eval_policies.py --dry-run   # only the list: tested / untested
-      python experiments/rl_inference/eval_policies.py
-   ```
-
-      To deploy specific models, name them (a name is looked up in `models_proprio/`; a path works too), and add `--wandb` to upload the runs: `python experiments/rl_inference/eval_policies.py --wandb walrus models/ibex_policy.pt`. Without `--wandb` nothing is uploaded for named models.
+3. **Evaluate** with the commands in the section of your policies: [proprio](#proprioceptive-policies), [extero](#exteroceptive-policies-with-the-cube-pose) or [optional](#optional-tasks-and-special-modes).
 4. **Run.** Put the cube in the palm; each run starts by itself when the cube lies still and the motors are cool enough. If the cube falls, put it back: the run goes on. At the third drop the run ends and the next policy starts (`--max-drops 2`). Keys in the window: space = start or continue now, `n` = next policy, `q` = quit. Ctrl+C switches the torque off and stops.
 5. **Results.** Locally in `logs/real_eval/` (`results.csv` and a folder per run with the video). On W&B in [rwr-skin/real_hand_eval](https://wandb.ai/rwr-skin/real_hand_eval), in the same format as the other real-hand evaluation (one run per policy run, grouped by model, and the `leaderboard` run), with `eval.evaluator = eval_policies.py`. The upload runs in the background while the next policy starts. Only finished runs are uploaded (not skipped or aborted ones). The video of each run is uploaded too (about 25 MB; `--no-wandb-video` leaves it out). To add the videos to runs already on W&B, upload their folders again: `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/2026*_*`. If an upload failed (e.g. offline), the script prints the command to upload again, e.g. `python experiments/rl_inference/eval_policies.py --upload logs/real_eval/20261111_203512_lark`.
 
@@ -208,6 +221,137 @@ Run a policy trained in faive_lab on the hand, detect the cube, and calibrate th
 - **Cold start:** the leaderboard also takes only runs that started with the hottest motor at most 42.5 °C, so a run starts only below that.
 - Left as they are: the start pose (wrist 33° here, 30° there), the camera exposure (5 ms here, automatic there), the heat rule (pause at 65 °C here, stop at 58 °C there) and the turn counting.
 
+#### Proprioceptive policies
+
+The policies of the proprio task in `models_proprio/` (74 observations: no cube pose). They need no camera calibration; the camera only counts the turns.
+
+```bash
+python experiments/rl_inference/eval_policies.py --dry-run     # only the list: tested / untested
+python experiments/rl_inference/eval_policies.py               # evaluate and upload every untested one
+python experiments/rl_inference/eval_policies.py --wandb walrus models/ibex_policy.pt   # named models (a name or a path)
+```
+
+Models in `models_proprio/` that need another setting (the optional tasks, students, …) are listed as `not evaluated` with the arguments to use: see [Optional tasks and special modes](#optional-tasks-and-special-modes).
+
+#### Exteroceptive policies (with the cube pose)
+
+The policies of the extero task (`orca-v2-inhand-repose-extero-v0`) in `models_extero/` (82 observations: the 74 proprioceptive ones and the cube pose). They need the camera's pose relative to the hand; without `--calibration` the script sets them aside. Details: [experiments/README.md](experiments/README.md#calibrate-the-camera).
+
+1. **Calibrate the camera** against an AprilTag (`tag36h11`), and again whenever the camera or the tag moves. Start the camera, then in a second sourced terminal run the calibration with your tag's ID and the size of its black square (m). Hold the camera and tag still for about 3 s. Stop the launch afterwards: the evaluation starts its own camera.
+   ```bash
+   ros2 launch experiments cube_spin_v2.launch.py
+
+   # in a second terminal
+   source ~/ros_ws/install/setup.zsh
+   python3 experiments/rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.08 --output ~/camera_extrinsics.npy --visualize
+   ```
+   The calibration of the extero evaluation setup of 2026-11-13 is in the repository (`experiments/cfgs/calibration/camera_extrinsics_2026-11-13.npy`, described in the `.yaml` next to it). It is valid only while the camera and the tag stay where they were, so check it with step 3 before using it.
+2. **Measure the tag's pose from the mount** (the centre of the forearm's flat bottom face): `X Y Z` in metres and `ROLL PITCH YAW` in degrees, along the mount's axes (x from the index finger towards the little finger, y out of the palm, z up the forearm). These are the `hand_to_tag_*` arguments of `cube_spin_v2.launch.py`, see [Set the hand's position](experiments/README.md#set-the-hands-position). The default (`0 -0.04 0.423 60 0 0`) is the extero evaluation setup's (tag ID 9 flat on the table beyond the fingertips; how it was measured: `experiments/cfgs/calibration/camera_extrinsics_2026-11-13.yaml`). Measure your own if the hand, its stand or the tag moved; `python3 experiments/rl_inference/show_tag_axes.py` shows the tag's axes live (with the camera running) to find the yaw. In the commands below, replace `X Y Z ROLL PITCH YAW` with your six numbers (e.g. `--hand-to-tag 0 0.15 0 180 0 0`), or leave out `--hand-to-tag` to use the default. To find or check them by eye, `python experiments/rl_inference/tune_hand_to_tag.py --calibration <file>.npy` moves the hand to the start pose and shows the hand and the live cube in RViz with six sliders for the values; put the cube in the palm and move the sliders until the virtual cube sits where the real one does (`s` saves them into the `.yaml` next to the calibration).
+3. **Check the cube pose.** With the cube in the palm, the printed position is a few cm from (0, 0, -0.05), +z up. If not, fix the calibration or the tag's pose first:
+   ```bash
+   python experiments/rl_inference/eval_policies.py --camera-only \
+       --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+   ```
+4. **Evaluate** every untested model in `models_extero/` (add `--dry-run`: only the list), or named models (uploaded only with `--wandb`):
+   ```bash
+   python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+       --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+   python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+       --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW --wandb <name>
+   ```
+   The run itself works as above (start pose, drops, keys). Each run also writes `cube_obs.csv` (what the policy saw at each step), and `results.csv` gets `cube_obs_tracked_fraction`: the share of policy steps with a cube pose at most `--cube-pose-timeout` (0.25 s) old.
+
+   **Digital twin.** With `--calibration`, the hand model in its measured joint angles and the cube where the policy sees it (in the simulation's frame, with the goal position as a green dot) are shown in the top right corner of the camera window, and so in `video.mp4`, and in a separate RViz window. The cube turns red while it is lost: the policy then gets its last pose. With `--camera-only` the hand stays in the start pose, so the cube's place in the palm shows whether the calibration is right. `--no-twin` turns both off; `--twin` turns them on without a calibration (e.g. with `--mock`). If the RViz window is closed, the evaluation goes on (log: `node_logs/twin.log`).
+
+#### Optional tasks and special modes
+
+The optional tasks (spinning about every axis, turning the cube to goal orientations) are trained in `rwr-skin/orca_optional`, and `download_policies.py` puts them into `models_proprio/` next to the proprio policies. They, and other policies trained with other observations or another action alpha, never run without the matching arguments: the listing names the arguments each one needs, and a run with them evaluates only the models that need them (add `--dry-run` to see which). A model counts as tested only with runs in the setting it needs. Policies that take the cube pose (`lemur`, `manta`) also need `--calibration` (and `--hand-to-tag` if not the default), as in steps 1–3 of [the extero policies](#exteroceptive-policies-with-the-cube-pose). With `--models-dir models_extero` the same arguments run extero policies that need them.
+
+```bash
+# all axes: spin about --axis x, y or z (lemur, paca_allaxes); one axis per command
+python experiments/rl_inference/eval_policies.py --mode all-axes --axis z
+python experiments/rl_inference/eval_policies.py --mode all-axes --axis x --calibration ~/camera_extrinsics.npy
+# goals: turn the cube to random orientations (manta)
+python experiments/rl_inference/eval_policies.py --mode goals --calibration ~/camera_extrinsics.npy
+# distilled students, history policies, another action alpha
+python experiments/rl_inference/eval_policies.py --mode student
+python experiments/rl_inference/eval_policies.py --mode history
+python experiments/rl_inference/eval_policies.py --action-alpha 0.5
+```
+
+- `--mode all-axes --axis x|y|z`: policies trained to spin about every axis (`lemur` with the cube pose, `paca_allaxes` without). A model counts as all-axes when its training commanded x or y (`axis_probs` in its `.json`; with an axis curriculum, the share it reached). The turns are counted about that axis as the camera sees it, so x and y need `--calibration` (or `--mock`) even for policies without the cube pose. The default speed is the top of the model's training range about the axis. Runs about x and y are on W&B but not in the leaderboard.
+- `--mode goals`: the goal task (`manta`, 84 inputs): the policy turns the cube to random orientations; a goal counts as reached within `--goal-tolerance` (0.4 rad). The score is the goals in a row (`goals`, `goals_before_first_drop`); a run ends after `--goal-timeout` (80 s) without a goal, and lasts 120 s by default. Needs `--calibration`. On W&B with `result/goals` and the tag `goals`, but not in the leaderboard. The digital twin shows the goal orientation as a second cube beside the hand.
+- `--mode student`: distilled students with an LSTM (`cygnet_lstm`, `lark_lstm`; the memory is cleared at every reset) or with 10 steps of history of every observation (740 inputs: `cygnet_hist`, `lark_hist`).
+- `--mode history`: 5 steps of history of the joint positions and the last joint commands (210 inputs: `newt`, `tapir`).
+- `--action-alpha A`: policies trained with another action alpha than 0.2 (`paca_alpha05`, `paca_alpha08`). Combines with the modes and with `--models-dir models_extero`.
+
+Teachers that take the 218 privileged observations of the simulation (`swan`, `lark`) cannot run on the hand in any mode.
+
+### Demo mode (live demo with a dashboard)
+
+`experiments/rl_inference/demo.py` shows one policy spinning the cube to TAs and visitors. It is built on `eval_policies.py` (same start pose, hand controller, camera and cube detector), with these differences: every demo is 3 runs of 60 s with the same policy, drop detection is off (the policy keeps running when the cube falls), a run starts only when every motor is below `start_temp_c` (38 °C), a full-screen dashboard replaces the camera window, and nothing goes to W&B. Results: `logs/demo/` (`results.csv` and a folder per run).
+
+**Before the demo:**
+
+1. Activate the environment and source the workspace (`micromamba activate rwr_jazzy`, `source install/setup.zsh`), and run everything from the repository root.
+2. Download the models: `python experiments/rl_inference/download_policies.py`.
+3. Extero and optional: the camera is plugged in (USB 3) and calibrated where it stands now (`apriltag_calibration.py`, as in step 1 of [the extero policies](#exteroceptive-policies-with-the-cube-pose)); the file is `camera.calibration` in the config.
+4. Rehearse without hardware with `--mock`, then run the pre-flight check with `--dry-run` (policy loads and fits the mode, calibration present; the hand does not move).
+
+**The config.** Everything a demo uses is in [experiments/cfgs/demo.yaml](experiments/cfgs/demo.yaml) (`--config` another file). The defaults are the best measured runs on the real hand (servo acc 0, action alpha 0.5, 2 rad/s):
+
+```yaml
+common:   {duration_s: 60, repeats: 3, start_temp_c: 38.0, out: logs/demo, rviz: false, torch_threads: 1}
+camera:   {calibration: ~/camera_extrinsics.npy, hand_to_tag: [0.0, -0.04, 0.423, 60.0, 0.0, 0.0]}
+proprio:  {model: models_proprio/rooster_new_policy.pt, servo_acc: 0, action_alpha: 0.5, speed: 2.0}
+extero:   {model: models_extero/extero_ibex_aramp05_acc250_policy.pt, servo_acc: 0, action_alpha: 0.5, speed: 2.0}
+optional:
+  task: axes                                 # axes | goals (--task overrides)
+  axes:  {model: models_proprio/lemur_policy.pt, action_alpha: 0.2, speed: null, axes: [x, y, z]}
+  goals: {model: models_proprio/manta_policy.pt, action_alpha: 0.2, goal_tolerance: 0.4}
+```
+
+- `model`: the policy file; `action_alpha` must be its training value (its `.json`).
+- `servo_acc`: the servo ramp (raw ACC register, 0 = no ramp, max 254; `null`: `config.yaml`'s). Passed to the hand controller as the ROS parameter `hand_controller/servo_acceleration_raw`, which overrides `servo_acceleration_raw` of `config.yaml` for that session (`eval_policies.py` has the same as `--servo-acc`).
+- `speed`: commanded spin speed in rad/s (sign = direction); `null` in `axes`: the top of the model's training range about each axis.
+- `duration_s`, `repeats`: policy time per run and runs per demo (`axes`: one run per entry of `axes` instead).
+
+**Run:**
+
+```bash
+python experiments/rl_inference/demo.py --mode proprio                 # no camera
+python experiments/rl_inference/demo.py --mode extero                  # camera plugged in
+python experiments/rl_inference/demo.py --mode optional --task axes    # or --task goals (default: optional.task)
+python experiments/rl_inference/demo.py --mode extero --dry-run        # only the pre-flight check
+python experiments/rl_inference/demo.py --mode extero --mock           # rehearsal: fake hand, drawn cube
+python experiments/rl_inference/demo.py --mode proprio --windowed      # dashboard in a window, not full screen
+```
+
+**During the demo.** Each run: the hand parks at the start pose, waits until the motors are cool, then for SPACE (cube in the palm), counts down, runs 60 s and parks again.
+
+| Key | Action |
+|---|---|
+| SPACE | start / continue |
+| P | pause: hand to the start pose, torque off (to put the cube back) |
+| E | emergency stop: torque off where the hand is |
+| N | next run |
+| Q | quit |
+| F | full screen on/off |
+
+Ctrl+C in the terminal stops everything with the torque off. The dashboard shows, per mode:
+
+- proprio: the digital twin, joint angle bars, motor temperatures and currents, and the control-loop rate;
+- extero: the camera view with turns and speed;
+- optional/axes: the commanded axis of each run; optional/goals: the angle to the goal and the goals reached.
+
+**Performance tips:**
+
+- Start cool: let the motors get below `start_temp_c` between demos rather than raising it.
+- Keep `torch_threads: 1`, `rviz: false` (the dashboard has the twin); W&B is always off.
+- On macOS, `caffeinate` runs automatically (no sleep, no App Nap); keep the laptop on power.
+- Watch the dashboard's control-loop rate: it should stay at about 20 Hz.
+- Camera on a USB 3 port.
+
 ## Imitation learning
 
 The hand follows the Rokoko glove through the retargeter, and the Franka arm follows the glove's wrist. The Franka arm controller is not part of this repository: it subscribes to `/right/arm/end_effector_pose_cmd` and publishes `/right/arm/end_effector_pose`.
@@ -216,30 +360,34 @@ The hand follows the Rokoko glove through the retargeter, and the Franka arm fol
 2. **Retargeter.** Tune the mapping from your hand to the robot hand, see [src/retargeter/README.md](src/retargeter/README.md). The ORCA v2 settings are in `experiments/cfgs/retargeter/`.
 3. **Test the teleop** (no recording):
    ```bash
-      ros2 launch experiments teleop_rokoko.launch.py
+       ros2 launch experiments teleop_rokoko.launch.py
    ```
-
-      A `keyboard_runner` terminal opens: press Enter to start, pause and resume the teleop. Foot pedals that type keys work the same way.
+   ```
+   A `keyboard_runner` terminal opens: press Enter to start, pause and resume the teleop. Foot pedals that type keys work the same way.
+   ```
 4. **Record demonstrations.** Set `DATASET_NAME` in `record_demonstration.launch.py`, then:
    ```bash
-      ros2 launch experiments record_demonstration.launch.py
+       ros2 launch experiments record_demonstration.launch.py
    ```
-
-      In the `keyboard_runner` terminal, Enter starts the teleop, starts the recording and stops it. Each demonstration is saved as an `.h5` file in `tmp/<DATASET_NAME>/` (relative to where you launched). The recorded topics are listed in `experiments/cfgs/logger/datacollection_default.yaml`.
+   ```
+   In the `keyboard_runner` terminal, Enter starts the teleop, starts the recording and stops it. Each demonstration is saved as an `.h5` file in `tmp/<DATASET_NAME>/` (relative to where you launched). The recorded topics are listed in `experiments/cfgs/logger/datacollection_default.yaml`.
+   ```
 5. **Process the data.** Resample all topics of the recordings in a folder to a common rate:
    ```bash
-      ros2 run logger syncronize_data.py tmp/<DATASET_NAME> --sampling_freq 10
+       ros2 run logger syncronize_data.py tmp/<DATASET_NAME> --sampling_freq 10
    ```
-
-      Check the demonstrations with `experiments/scripts/plot_trajectories.py` and `experiments/scripts/visualize_videos.py`.
+   ```
+   Check the demonstrations with `experiments/scripts/plot_trajectories.py` and `experiments/scripts/visualize_videos.py`.
+   ```
 6. **Train** a policy, e.g. with [srl_il](https://github.com/srl-ethz/srl_il).
 7. **Run the policy.** Start the cameras and the hand, then the policy:
    ```bash
-      ros2 launch experiments controllers_and_cameras.launch.py
-      ros2 launch experiments run_policy_inference.launch.py policy_ckpt_path:=/path/to/policy.ckpt
+       ros2 launch experiments controllers_and_cameras.launch.py
+       ros2 launch experiments run_policy_inference.launch.py policy_ckpt_path:=/path/to/policy.ckpt
    ```
-
-      The inference config (`experiments/cfgs/inference_config_*.yaml`, set with `inference_cfg_file:=`) maps the camera and joint topics to the policy's inputs and outputs; it must match your training data.
+   ```
+   The inference config (`experiments/cfgs/inference_config_*.yaml`, set with `inference_cfg_file:=`) maps the camera and joint topics to the policy's inputs and outputs; it must match your training data.
+   ```
 
 ## Other tools
 

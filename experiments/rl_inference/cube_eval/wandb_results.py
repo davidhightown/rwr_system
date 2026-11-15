@@ -55,7 +55,9 @@ DEFAULT_SPEED = 2.0  # rad/s, for a model without a goal speed on W&B
 REFERENCE_MODEL = "48_ibex"  # as in the other evaluation: run it now and then to see whether the hand changed
 MAX_START_C = 42.5  # cold start: the hottest motor at most this warm when the run starts (as in the other evaluation)
 CURVE_STEP_S = 0.5
-FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.csv", "temperatures.csv", "health.csv")
+FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.csv", "temperatures.csv", "health.csv",
+         "cube_obs.csv", "goals.csv")
+OBS_DIM_PROPRIO = 74  # a run's policy takes more observations: it has the cube pose (cube_spin_policy.py)
 VIDEO = "video.mp4"
 VIDEO_KEY = "eval/video"  # a wandb.Video: plays in the run's media panel (a file under Files does not)
 UPLOADED_OUTCOMES = ("completed", "too many drops")  # the others say nothing about the policy
@@ -69,7 +71,8 @@ SUMMARY = {
     "longest_stall_s": "result/longest_stall_s",
     "drops": "result/drops", "first_drop_s": "result/first_drop_s", "pause_drop_s": "result/pause_drop_s",
     "wall_s": "result/wall_s",
-    "tracked_fraction": "cube/tracked_fraction", "detections_per_s": "cube/poses_per_s",
+    "tracked_fraction": "cube/tracked_fraction", "cube_obs_tracked_fraction": "cube/policy_tracked_fraction",
+    "detections_per_s": "cube/poses_per_s",
     "rejected_share": "cube/rejected_poses", "longest_gap_s": "cube/longest_gap_s", "gap_s": "cube/gap_s",
     "tilt_turns": "cube/tilt_turns", "cube_offset_mean_mm": "cube/offset_mean_mm",
     "cube_offset_max_mm": "cube/offset_max_mm", "camera_tilt_deg": "cube/camera_tilt_deg",
@@ -83,6 +86,9 @@ SUMMARY = {
     "servo_errors": "hand/servo_errors", "temperature_glitches": "hand/temperature_glitches",
     "joint_delay_median_ms": "hand/median_lag_ms", "worst_joint": "hand/worst_joint",
     "worst_joint_error_rms_deg": "hand/worst_joint_error_deg", "joint_error_rms_deg": "hand/joint_error_rms_deg",
+    # the goal task (--mode goals); empty in the spinning runs, so left out there
+    "goals": "result/goals", "goals_before_first_drop": "result/goals_before_drop",
+    "first_goal_s": "result/first_goal_s", "s_per_goal": "result/s_per_goal",
 }
 STOP_REASONS = {"completed": "time", "too many drops": "too many drops"}
 
@@ -120,9 +126,14 @@ def retry(call, attempts=4):
 
 
 # -- what W&B knows (records: {"id", "job_type", "config", "summary"} per W&B run)
+def setting(mode="", action_alpha=0.2):
+    """How a run ran its policy: (eval_policies.py --mode, action alpha); older runs: ("", 0.2)."""
+    return mode or "", round(number(action_alpha) or 0.2, 3)
+
+
 def known_models(records):
-    """{short name: dict(name, shas, runs, idx, description, created, checkpoint_iteration, train, sim, own_goal)} from
-    the real_hand runs on W&B. The first record that has a field gives it."""
+    """{short name: dict(name, shas, runs, settings, idx, description, created, checkpoint_iteration, train, sim,
+    own_goal)} from the real_hand runs on W&B. The first record that has a field gives it."""
     out = {}
     for r in records:
         if r.get("job_type") != "real_hand":
@@ -132,8 +143,10 @@ def known_models(records):
         short = m.get("short_name") or m.get("name")
         if not short:
             continue
-        k = out.setdefault(short, dict(name=m.get("name") or short, shas=set(), runs=0))
+        k = out.setdefault(short, dict(name=m.get("name") or short, shas=set(), runs=0, settings=set()))
         k["runs"] += 1
+        e = config.get("eval") or {}
+        k["settings"].add(setting(e.get("mode"), e.get("action_alpha")))
         if m.get("policy_sha256"):
             k["shas"].add(m["policy_sha256"])
         for key in ("idx", "description", "created", "checkpoint_iteration"):
@@ -177,21 +190,24 @@ def runs(entry):
     return f"{entry['runs']} run" + ("s" if entry["runs"] != 1 else "")
 
 
-def tested_because(known, name, sha):
-    """Why a model counts as tested ("" = it does not)."""
+def tested_because(known, name, sha, run_setting=None):
+    """Why a model counts as tested ("" = it does not); with run_setting (setting()), only runs with that setting
+    count (a run without the --mode or the action alpha the model needs says nothing about it)."""
+    ok = lambda k: run_setting is None or run_setting in k.get("settings", {setting()})  # noqa: E731
     if sha:
         for short, k in known.items():
-            if sha in k["shas"]:
+            if sha in k["shas"] and ok(k):
                 return f"same file as {k['name']} ({runs(k)} on W&B)"
     short, k = find_model(known, name)
-    return f"{k['name']} has {runs(k)} on W&B" if k else ""
+    return f"{k['name']} has {runs(k)} on W&B" if k and ok(k) else ""
 
 
-def split_models(models_dir, known):
-    """The models in models_dir (*_policy.pt, by name): ([untested files], [(tested file, why)])."""
+def split_models(models_dir, known, setting_of=None):
+    """The models in models_dir (*_policy.pt, by name): ([untested files], [(tested file, why)]). setting_of: the
+    setting() a model file needs, if only runs with it count."""
     todo, done = [], []
     for path in sorted(Path(models_dir).glob("*_policy.pt")):
-        why = tested_because(known, model_name(path), sha256(path))
+        why = tested_because(known, model_name(path), sha256(path), setting_of(path) if setting_of else None)
         (done.append((path, why)) if why else todo.append(path))
     return todo, done
 
@@ -218,6 +234,8 @@ def config_of(meta, run_dir, known):
     start = number(meta.get("temp_max_start_c"))
     commit = str(meta.get("git_commit", ""))
     sim = dict(k.get("sim") or {})
+    observations = number(meta.get("observations")) or OBS_DIM_PROPRIO  # older runs: all proprioceptive
+    cube_pose = meta.get("cube_pose", observations > OBS_DIM_PROPRIO)  # older runs: 74 or 82 observations
     return dict(
         model=dict(name=k.get("name", name), short_name=short or name, idx=k.get("idx"),
                    description=k.get("description", ""), checkpoint_iteration=k.get("checkpoint_iteration"),
@@ -226,7 +244,11 @@ def config_of(meta, run_dir, known):
         sim=sim,
         eval=dict(evaluator=EVALUATOR, session=run_dir.parent.name, run_folder=run_dir.name,
                   started=meta.get("time", ""), date=str(meta.get("time", ""))[:10], note=meta.get("note", ""),
-                  host=meta.get("host", ""), goal_rad_s=goal, own_goal_rad_s=own,
+                  host=meta.get("host", ""), observations=int(observations), cube_pose=bool(cube_pose),
+                  # the filter on the cube pose the policy got; extero runs before 2026-11-13 had none
+                  cube_filter=meta.get("cube_filter", "none" if cube_pose else ""),
+                  mode=meta.get("mode") or "", axis=meta.get("axis") or "z",
+                  action_alpha=number(meta.get("action_alpha")) or 0.2, goal_rad_s=goal, own_goal_rad_s=own,
                   at_own_goal=own is None or goal is None or abs(goal - own) <= 1e-6,
                   start_temp_max_c=start, cold_start=start is None or start <= MAX_START_C,
                   reference=k.get("name", name) == REFERENCE_MODEL,
@@ -258,7 +280,8 @@ def summary_of(meta):
 
 def tags_of(config, summary):
     return [t for t in (summary.get("result/outcome", ""), "reference" if config["eval"]["reference"] else "",
-                        EVALUATOR) if t]
+                        "cube_pose" if config["eval"].get("cube_pose") else "",
+                        "goals" if config["eval"].get("mode") == "goals" else "", EVALUATOR) if t]
 
 
 def read_csv(path):
@@ -281,6 +304,11 @@ def curves(run_dir, duration):
     c = np.array([0.0] + [c for _, c in turns])
     for p in points:  # the last counted value before each point
         p["curve/turns"] = float(c[np.searchsorted(t, p["time_s"], side="right") - 1])
+    if (run_dir / "goals.csv").exists():  # the goal task: the goals reached so far
+        goal_times = [number(r.get("policy_time_s")) for r in read_csv(run_dir / "goals.csv")]
+        goal_times = np.sort([g for g in goal_times if g is not None])
+        for p in points:
+            p["curve/goals"] = int(np.searchsorted(goal_times, p["time_s"], side="right"))
     temps = [r for r in read_csv(run_dir / "temperatures.csv") if number(r.get("policy_time_s")) is not None
              and r.get("state") == "running"]
     if temps:
@@ -318,6 +346,8 @@ def leaderboard_rows(records):
         config, s = r.get("config") or {}, r.get("summary") or {}
         e, m = config.get("eval") or {}, config.get("model") or {}
         if not (e.get("at_own_goal", True) and e.get("cold_start", True)) or number(s.get("result/turns")) is None:
+            continue
+        if e.get("axis", "z") != "z" or e.get("mode") == "goals":  # turns about z only
             continue
         groups.setdefault(m.get("name") or m.get("short_name") or "?", []).append(r)
     rows = []

@@ -29,7 +29,13 @@ The joint limits, observation order and scales in the script must match the faiv
 
 ### Evaluate policies on the real hand
 
-`rl_inference/eval_policies.py` runs exported policies one after another on the real hand and counts the cube's turns with the camera. It is for policies without the cube pose (task `orca-v2-inhand-repose-v0`, 74 observations). One command starts the hand controller, the camera and the live window. It works on Linux and macOS, and it needs no camera calibration.
+`rl_inference/eval_policies.py` runs exported policies one after another on the real hand and counts the cube's turns with the camera. It takes policies without the cube pose (task `orca-v2-inhand-repose-v0`, 74 observations) and, with a camera calibration, policies with it (task `orca-v2-inhand-repose-extero-v0`, 82 observations); it tells them apart by their input size. One command starts the hand controller, the camera and the live window. It works on Linux and macOS.
+
+For policies with the cube pose, the script needs the camera's pose relative to the hand: `--calibration` (the `cam_T_tag` file from `apriltag_calibration.py`, made with the camera where it is now) and `--hand-to-tag X Y Z ROLL PITCH YAW` (the `hand_to_tag_*` values of `cube_spin_v2.launch.py`). Check them with `--camera-only --calibration ...`: with the cube in the palm, the printed position is a few cm from (0, 0, -0.05), +z up. Such runs also write `cube_obs.csv`, and `results.csv` gets `cube_obs_tracked_fraction`, the share of policy steps with a cube pose at most `--cube-pose-timeout` (0.25 s) old.
+```bash
+python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+    --calibration ~/camera_extrinsics.npy --hand-to-tag X Y Z ROLL PITCH YAW
+```
 
 **Before the first use**
 - The ROS workspace is built and sourced, and the hand is calibrated.
@@ -115,15 +121,17 @@ To get the cube pose relative to the hand, the camera's position is measured onc
     ```
 3. In a second terminal, from the `experiments` folder, run the calibration with your tag's ID and size (in metres). Hold the camera and tag still for about 3 s while it collects 30 detections:
     ```bash
-    python3 rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.075 --output ~/camera_extrinsics.npy --visualize
+    python3 rl_inference/apriltag_calibration.py --tag-id 9 --tag-size 0.08 --output ~/camera_extrinsics.npy --visualize
     ```
 
 ### Set the hand's position
 
 The launch places the hand relative to the tag with the `hand_to_tag_*` arguments: the tag's pose seen from the mount, i.e. the centre of the forearm's flat bottom face (frame `mount` in `orcahand_v2.urdf.xacro`). The mount's axes: x from the index finger towards the little finger, y out of the palm, z up the forearm.
 
+The defaults (`0 -0.04 0.423`, `60 0 0`) are those of the extero evaluation setup: the tag (ID 9, 0.08 m) flat on the table beyond the fingertips, the forearm 30° below horizontal. How they were measured: [`cfgs/calibration/camera_extrinsics_2026-11-13.yaml`](cfgs/calibration/camera_extrinsics_2026-11-13.yaml). For another setup, measure them as follows.
+
 1. Measure `hand_to_tag_x/y/z` (in metres) from the mount to the tag's centre, along the mount's axes. The mount is hidden under the forearm: it is 4.65 cm in from the index and little-finger sides, and 4.8 cm in from the palm and back sides.
-2. Find `hand_to_tag_roll/pitch/yaw` (in degrees): how the tag's axes (x red, y green, z blue into the tag, as drawn by the calibration) are turned relative to the mount's axes; roll about x, then pitch about the new y, then yaw about the new z. With the tag square to the hand, these are multiples of 90°. For example, a tag lying flat in front of the palm with its x along the mount's x: roll 180, pitch 0, yaw 0.
+2. Find `hand_to_tag_roll/pitch/yaw` (in degrees): how the tag's axes (x red, y green, z blue into the tag, as drawn by the calibration, or live by `python3 rl_inference/show_tag_axes.py` with the camera running) are turned relative to the mount's axes; roll about x, then pitch about the new y, then yaw about the new z. With the tag square to the hand, these are multiples of 90°. For example, a tag lying flat in front of the palm with its x along the mount's x: roll 180, pitch 0, yaw 0.
 3. Launch with your values, e.g.:
     ```bash
     ros2 launch experiments cube_spin_v2.launch.py calibration:=$HOME/camera_extrinsics.npy \

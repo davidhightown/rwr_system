@@ -1,0 +1,20 @@
+# Camera calibration of the extero evaluation setup, 2026-11-12: OAK-D-S2 1944301041E91D1300 (bottom_view) looking
+# down at the palm, AprilTag tag36h11 ID 9 (black square 0.075 m) lying flat on the table beyond the fingertips.
+#
+#   python experiments/rl_inference/eval_policies.py --models-dir models_extero \
+#       --calibration experiments/cfgs/calibration/camera_extrinsics_2026-11-12.npy \
+#       --hand-to-tag 0 -0.109 0.320 90 0 0 --cube-pose-timeout 0.5
+#
+# Valid only while the camera and the tag stay where they were; recalibrate after moving either.
+
+# camera_extrinsics_2026-11-12.npy (apriltag_calibration.py --tag-id 9 --tag-size 0.075): the tag in the camera frame
+cam_T_tag:
+  - [-0.99993, 0.01133, -0.00355, 0.00221]
+  - [-0.01129, -0.99986, -0.01208, -0.11680]
+  - [-0.00369, -0.01204, 0.99992, 0.46286]
+  - [0.00000, 0.00000, 0.00000, 1.00000]
+
+# --hand-to-tag: the tag's pose from the mount (centre of the forearm's flat end face; x towards the little finger,
+# y out of the palm, z along the forearm towards the fingertips), m and deg (intrinsic XYZ).
+# x measured; y and z estimated with the cube in the palm at the task's goal position, still to be measured.
+hand_to_tag: [0.0, -0.109, 0.320, 90.0, 0.0, 0.0]
