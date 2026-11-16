@@ -11,16 +11,21 @@ FEETECH_PRESENT_VOLTAGE = 62  # 0.1 V per unit; register 63 is the temperature i
 
 
 class OrcaHandV2:
-    def __init__(self, config_path: str, acceleration_raw=None):
+    def __init__(self, config_path: str, acceleration_raw=None, max_current_ma=None):
         # An explicit config_path skips orca_core's hardware autodetection.
         # calibration.yaml is read from and saved next to config_path.
         # acceleration_raw: the servo ramp to write instead of the config's servo_acceleration_raw (None: the config's)
+        # max_current_ma: every motor's goal-current limit (mA) instead of the config's max_current (None: the
+        # config's); written after orca_core's init_joints, which writes the config's (and calibrates with its own)
         self._hand = load_hand(config_path=config_path)
         with open(config_path) as stream:
             self._config_yaml = yaml.safe_load(stream)
         if acceleration_raw is not None:
             self._config_yaml[servo_profile.CONFIG_KEY] = acceleration_raw
         servo_profile.acceleration_raw(self._config_yaml)  # reject a bad value before the hand moves
+        if max_current_ma is not None and (isinstance(max_current_ma, bool) or not 0 < float(max_current_ma) <= 5000):
+            raise ValueError(f"max_current_ma must be a number of mA from 1 to 5000, got {max_current_ma!r}")
+        self.max_current_ma = None if max_current_ma is None else int(max_current_ma)
         config = self._hand.config
         self.joint_ids = list(config.joint_ids)
         self.num_motors = len(self.joint_ids)
@@ -43,6 +48,8 @@ class OrcaHandV2:
         self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
         # The same servo acceleration ramp as the chirp recordings the sim was fit to (init_joints writes orca_core's own).
         self.servo_profile = servo_profile.apply(self._hand, self._config_yaml)
+        if self.max_current_ma is not None:  # clamped by orca_core to each motor's hardware ceiling
+            self._hand.set_max_current(self.max_current_ma)
         if compliant_test_mode:
             self.disable_torque()
 

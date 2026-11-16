@@ -26,7 +26,8 @@ TXT, SUB, MUTED = rgb(238, 241, 246), rgb(152, 162, 178), rgb(98, 108, 124)
 GREEN, YELLOW, ORANGE, RED = rgb(70, 214, 120), rgb(255, 208, 70), rgb(255, 144, 48), rgb(245, 72, 72)
 BLUE, PURPLE, TEAL, AMBER, WHITE = rgb(72, 160, 255), rgb(170, 124, 255), rgb(46, 210, 196), rgb(255, 186, 56), TXT
 COLORS = dict(green=GREEN, yellow=YELLOW, orange=ORANGE, red=RED, white=WHITE)
-MODE_COLORS = dict(proprio=PURPLE, extero=BLUE, axes=TEAL, goals=AMBER)
+MODE_COLORS = dict(proprio=PURPLE, proprio_camera=PURPLE, extero=BLUE, axes=TEAL, goals=AMBER)  # proprio_camera:
+# the proprio policy with the camera plugged in (the camera view and the turns, as extero)
 STATE_COLORS = dict(running=GREEN, cooling=ORANGE, waiting=YELLOW, countdown=YELLOW, paused=WHITE, stopped=RED,
                     done=WHITE, starting=SUB)
 GROUPS = ("thumb", "index", "middle", "ring", "pinky", "wrist")

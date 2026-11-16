@@ -289,37 +289,43 @@ Teachers that take the 218 privileged observations of the simulation (`swan`, `l
 
 ### Demo mode (live demo with a dashboard)
 
-`experiments/rl_inference/demo.py` shows one policy spinning the cube to TAs and visitors. It is built on `eval_policies.py` (same start pose, hand controller, camera and cube detector), with these differences: every demo is 3 runs of 60 s with the same policy, drop detection is off (the policy keeps running when the cube falls), a run starts only when every motor is below `start_temp_c` (38 °C), a full-screen dashboard replaces the camera window, and nothing goes to W&B. Results: `logs/demo/` (`results.csv` and a folder per run).
+`experiments/rl_inference/demo.py` shows one policy spinning the cube to TAs and visitors. It is a program of its own (it does not use `eval_policies.py`; it shares only the camera/dashboard process, the twin renderer, the thermal model and the turn counter in `cube_eval/`): the policy runs in a thread of its own at 20 Hz, and the terminal reports every policy step that comes more than 150 ms after the one before (and whether the hand controller's joint positions were late then). Compared with the evaluation: every demo is 3 runs of 60 s with the same policy, drop detection is off (the policy keeps running when the cube falls), a run starts only when every motor is below `start_temp_c` (38 °C), a full-screen dashboard replaces the camera window, and nothing goes to W&B. Results: `logs/demo/` (`results.csv` and a folder per run with `joints.csv`, `steps.csv` (every policy step), `health.csv`, `trace.csv`, `meta.json` and, with a camera, `video.mp4`).
 
 **Before the demo:**
 
 1. Activate the environment and source the workspace (`micromamba activate rwr_jazzy`, `source install/setup.zsh`), and run everything from the repository root.
 2. Download the models: `python experiments/rl_inference/download_policies.py`.
-3. Extero and optional: the camera is plugged in (USB 3) and calibrated where it stands now (`apriltag_calibration.py`, as in step 1 of [the extero policies](#exteroceptive-policies-with-the-cube-pose)); the file is `camera.calibration` in the config.
+3. Extero, optional and proprio with `use_camera: true`: the camera is plugged in (USB 3) and calibrated where it stands now (`apriltag_calibration.py`, as in step 1 of [the extero policies](#exteroceptive-policies-with-the-cube-pose)); the file is `camera.calibration` in the config (proprio with the camera needs no calibration: it counts the turns about the camera's viewing axis).
 4. Rehearse without hardware with `--mock`, then run the pre-flight check with `--dry-run` (policy loads and fits the mode, calibration present; the hand does not move).
 
 **The config.** Everything a demo uses is in [experiments/cfgs/demo.yaml](experiments/cfgs/demo.yaml) (`--config` another file). The defaults are the best measured runs on the real hand (servo acc 0, action alpha 0.5, 2 rad/s):
 
 ```yaml
-common:   {duration_s: 60, repeats: 3, start_temp_c: 38.0, out: logs/demo, rviz: false, torch_threads: 1}
+common:   {duration_s: 60, repeats: 3, start_temp_c: 38.0, out: logs/demo, twin: true, torch_threads: 1}
 camera:   {calibration: ~/camera_extrinsics.npy, hand_to_tag: [0.0, -0.04, 0.423, 60.0, 0.0, 0.0]}
-proprio:  {model: models_proprio/rooster_new_policy.pt, servo_acc: 0, action_alpha: 0.5, speed: 2.0}
-extero:   {model: models_extero/extero_ibex_aramp05_acc250_policy.pt, servo_acc: 0, action_alpha: 0.5, speed: 2.0}
+proprio:  {model: models_proprio/rooster_new_policy.pt, use_camera: false, servo_acc: 0, max_current: null,
+           action_alpha: 0.5, speed: 2.0}
+extero:   {model: models_extero/extero_ibex_aramp05_acc250_policy.pt, servo_acc: 0, max_current: null,
+           action_alpha: 0.5, speed: 2.0}
 optional:
   task: axes                                 # axes | goals (--task overrides)
-  axes:  {model: models_proprio/lemur_policy.pt, action_alpha: 0.2, speed: null, axes: [x, y, z]}
-  goals: {model: models_proprio/manta_policy.pt, action_alpha: 0.2, goal_tolerance: 0.4}
+  axes:  {model: models_proprio/lemur_policy.pt, max_current: null, action_alpha: 0.2, speed: null, direction: 1,
+          axes: [x, y, z]}
+  goals: {model: models_proprio/manta_policy.pt, max_current: null, action_alpha: 0.2, goal_tolerance: 0.4}
 ```
 
+- `use_camera` (proprio): `false` without the camera (the dashboard shows the perceived state, the hand as measured); `true` if the camera may be plugged in: the camera view, the cube's turns and a video as in extero, without the perceived state (the policy still gets no cube pose).
 - `model`: the policy file; `action_alpha` must be its training value (its `.json`).
 - `servo_acc`: the servo ramp (raw ACC register, 0 = no ramp, max 254; `null`: `config.yaml`'s). Passed to the hand controller as the ROS parameter `hand_controller/servo_acceleration_raw`, which overrides `servo_acceleration_raw` of `config.yaml` for that session (`eval_policies.py` has the same as `--servo-acc`).
-- `speed`: commanded spin speed in rad/s (sign = direction); `null` in `axes`: the top of the model's training range about each axis.
+- `max_current` (every section): the goal-current limit of every motor in mA (orca_core clamps it to each motor's ceiling); `null`: `config.yaml`'s `max_current` (`default`: 900 mA). Passed to the hand controller as the ROS parameter `hand_controller/max_current_ma`, written after `init_joints` for that session only.
+- `speed`: commanded spin speed in rad/s (sign = direction); in `axes` one for all axes or one per axis (`{x: 1.0, y: 1.0, z: 1.5}`), `null`: the top of the model's training range about each axis.
+- `direction` (`axes`): `1` or `-1`, the sign of the spin about every axis, or one per axis (`{x: 1, y: -1, z: 1}`); it overrides the sign of `speed` (+ = counter-clockwise looking down the axis, right-hand rule). The policy's `.json` records only the speed range, not whether it was trained in both directions: rehearse a reversed axis with `--mock` and once on the hand before the demo.
 - `duration_s`, `repeats`: policy time per run and runs per demo (`axes`: one run per entry of `axes` instead).
 
 **Run:**
 
 ```bash
-python experiments/rl_inference/demo.py --mode proprio                 # no camera
+python experiments/rl_inference/demo.py --mode proprio                 # proprio.use_camera: without or with the camera
 python experiments/rl_inference/demo.py --mode extero                  # camera plugged in
 python experiments/rl_inference/demo.py --mode optional --task axes    # or --task goals (default: optional.task)
 python experiments/rl_inference/demo.py --mode extero --dry-run        # only the pre-flight check
@@ -340,8 +346,8 @@ python experiments/rl_inference/demo.py --mode proprio --windowed      # dashboa
 
 Ctrl+C in the terminal stops everything with the torque off. The dashboard shows, per mode:
 
-- proprio: the digital twin, joint angle bars, motor temperatures and currents, and the control-loop rate;
-- extero: the camera view with turns and speed;
+- proprio without the camera: the perceived state (the hand as measured), joint angle bars, motor temperatures and currents, and the control-loop rate;
+- proprio with the camera, extero: the camera view with turns and speed;
 - optional/axes: the commanded axis of each run; optional/goals: the angle to the goal and the goals reached.
 
 **Performance tips:**

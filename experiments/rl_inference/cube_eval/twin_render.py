@@ -26,6 +26,7 @@ from scipy.spatial.transform import Rotation
 
 PANEL_SIZE = (300, 380)  # width, height (pixels)
 RATE_HZ = 20.0
+TITLE = "digital twin: what the policy sees"  # the panel's title (demo.py: "perceived state")
 EYE, TARGET, FOV_DEG = (0.24, -0.2, 0.2), (0.0, 0.02, -0.035), 45.0  # in sim_world, as twin.py
 LIGHT = dict(lightDirection=[0.3, -1.0, 1.5], lightAmbientCoeff=0.45, lightDiffuseCoeff=0.55, lightSpecularCoeff=0.05)
 HAND_RGBA = [0.72, 0.74, 0.78, 1.0]
@@ -77,16 +78,16 @@ def cube_mesh(dae_path):
             pick("normals-array").reshape(-1, 3))
 
 
-def run(state_q, image_q, stop, joint_ids, cube_edge):
+def run(state_q, image_q, stop, joint_ids, cube_edge, title=TITLE):
     signal.signal(signal.SIGINT, signal.SIG_IGN)  # the main process stops this one
     try:
-        _run(state_q, image_q, stop, list(joint_ids), float(cube_edge))
+        _run(state_q, image_q, stop, list(joint_ids), float(cube_edge), str(title))
     except Exception:
         print("The digital twin in the video stopped:")
         traceback.print_exc()
 
 
-def _run(state_q, image_q, stop, joint_ids, cube_edge):
+def _run(state_q, image_q, stop, joint_ids, cube_edge, title=TITLE):
     from ament_index_python.packages import get_package_share_directory
     from cube_spin_policy import GOAL_POS, OBS_T_HAND
     from .hud import GREEN, RED, WHITE, text
@@ -153,7 +154,7 @@ def _run(state_q, image_q, stop, joint_ids, cube_edge):
                                                    shadow=0, **LIGHT)
             panel = cv2.cvtColor(np.reshape(rgba, (height, width, 4))[:, :, :3].astype(np.uint8), cv2.COLOR_RGB2BGR)
             panel[np.reshape(mask, (height, width)) < 0] = BACKGROUND
-            text(panel, "digital twin: what the policy sees", (8, 18), WHITE, 0.45)
+            text(panel, title, (8, 18), WHITE, 0.45)
             if goal is not None:
                 text(panel, "goal", goal_label, GREEN, 0.45)
             for i, line in enumerate(lines):

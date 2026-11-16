@@ -43,6 +43,9 @@ class HandControllerNode(Node):
             # servo acceleration ramp (raw ACC register) instead of config.yaml's servo_acceleration_raw; -1: the config's
             self.declare_parameter('hand_controller/servo_acceleration_raw', -1)
             acceleration_raw = self.get_parameter('hand_controller/servo_acceleration_raw').value
+            # every motor's goal-current limit (mA) instead of config.yaml's max_current; -1: the config's
+            self.declare_parameter('hand_controller/max_current_ma', -1)
+            max_current_ma = self.get_parameter('hand_controller/max_current_ma').value
 
             config_dir_path = os.path.join(
                 get_package_share_directory("hand_control"),
@@ -64,12 +67,17 @@ class HandControllerNode(Node):
 
             from faive_system.src.hand_control.orca.hand_controller_v2 import OrcaHandV2
             # orca_core requires the file name config.yaml; calibration.yaml is stored next to it
+            # max_current_ma only when set: the default also runs with an older hand_controller_v2.py
             self._hc = OrcaHandV2(os.path.join(config_dir_path, self.chirality, "config.yaml"),
-                                  acceleration_raw=None if acceleration_raw < 0 else int(acceleration_raw))
+                                  acceleration_raw=None if acceleration_raw < 0 else int(acceleration_raw),
+                                  **({} if max_current_ma < 0 else dict(max_current_ma=int(max_current_ma))))
             self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode)
             self.get_logger().info(
                 f"Servo acceleration {self._hc.servo_profile['servo_acceleration_raw']} (raw) on every motor; "
                 "the sim's ORCA_V2_SERVO_ACCEL must come from chirps recorded with the same value")
+            self.get_logger().info(
+                "Max current " + (f"{self._hc.max_current_ma} mA" if getattr(self._hc, "max_current_ma", None) is not None
+                                  else "from config.yaml") + " (goal-current limit of every motor)")
             self._orca_timer = self.create_timer(
                 0.01, # seconds
                 self.orca_v2_control_cb,  # callback
