@@ -169,6 +169,10 @@ def settings(plan, cli):
     if a.direction is not None and any(v not in (1, -1, None) for v in a.direction.values()):
         raise SystemExit(f"direction: +1 or -1 (or one per axis, e.g. {{x: 1, y: -1, z: 1}}), not {s['direction']!r}")
     a.goal_tolerance = float(s.get("goal_tolerance", 0.4)) if kind == "goals" else None
+    # goals: uniform (random orientations) or face90 (each goal 90 deg from the last); null: the model's .json, else uniform
+    a.goal_mode = s.get("goal_mode") if kind == "goals" else None
+    # goals: seconds the hand holds still (the last joint targets) when the cube reached a goal, before the next goal
+    a.goal_hold_s = max(0.0, float(s.get("goal_hold_s", 1.0) or 0.0)) if kind == "goals" else 0.0
     # the perceived state: where there is no camera view to look at, and where the cube pose matters (extero, goals)
     a.twin = bool(c.get("twin", True)) and not (kind == "proprio" and a.camera)
     a.fullscreen = bool(c.get("fullscreen", True)) and not cli.windowed
@@ -383,9 +387,14 @@ class Hand:
         self.voltage = np.array(msg.data, dtype=np.float64)
 
     # -- the policy loop (its own thread)
-    def start_policy(self, policy, clock, deadline):
+    def start_policy(self, policy, clock, deadline, goal_hold_s=0.0, on_hold=None):
         """Torque on at the present pose, then the policy takes over, starting as after a reset in the task, until
-        stop_policy() or the policy time clock() reaches deadline."""
+        stop_policy() or the policy time clock() reaches deadline. goal_hold_s (goal task): when the cube reached a
+        goal, the policy pauses for this long (wall time) and the hand holds its last joint targets; then the next
+        goal. on_hold(True / False): called when a hold starts and ends (Run.set_hold: the run's timer stops)."""
+        self.goal_hold_s = float(goal_hold_s or 0.0)
+        self.on_hold = on_hold or (lambda on: None)
+        self.holding = False  # True while the hand holds still at a reached goal (the dashboard's banner)
         self.stop_policy()
         self.set_torque(True)
         with self.lock:
@@ -407,14 +416,45 @@ class Hand:
             thread.join(timeout=2.0)
         with self.lock:
             self.policy_on = False
+        self.holding = False
 
     def _loop(self, policy, clock, deadline, stop):
         period = 1.0 / POLICY_HZ
         next_step = time.perf_counter()
         last = None
+        hold_until = None  # wall time (perf_counter) until which the hand holds still at a reached goal; the run's
+        # policy time stands still meanwhile (on_hold), so the hold does not shorten the run
+        try:
+            self._steps(policy, clock, deadline, stop, period, next_step, last, hold_until)
+        finally:
+            if self.holding:  # stopped during a hold (P, E, Q): the run's timer goes on counting from here
+                self.holding = False
+                self.on_hold(False)
+
+    def _steps(self, policy, clock, deadline, stop, period, next_step, last, hold_until):
         while not stop.is_set():
             if clock() >= deadline:
                 break  # the run's time is up, even if the main loop is late
+            if hold_until is not None:
+                if time.perf_counter() < hold_until:
+                    # holding at the goal: no policy step, the last joint targets again (the hand stays where it is)
+                    t = time.perf_counter()
+                    with self.lock:
+                        command = self.last_command
+                    if command is not None:
+                        self._publish(command)
+                    last = t  # a held step is no late step
+                    next_step += period
+                    delay = next_step - time.perf_counter()
+                    if delay < -period:
+                        next_step = time.perf_counter()
+                    elif delay > 0:
+                        stop.wait(delay)
+                    continue
+                hold_until = None
+                self.holding = False
+                self.on_hold(False)  # the run's timer goes on
+                policy.goals.advance()  # the next goal, and the policy goes on
             with self.lock:
                 q, qd, q_time = self.q, self.qd, self.q_time
                 cube = self.cube.observation(time.time()) if policy.use_cube_pose else None
@@ -439,6 +479,10 @@ class Hand:
                         self.stalls.append((now, interval, (time.time() - q_time) * 1000.0))
                     if goals is not None and goals.reached > reached:
                         self.goal_log.append(now)
+                if goals is not None and goals.reached > reached and goals.waiting:
+                    hold_until = time.perf_counter() + self.goal_hold_s
+                    self.holding = True
+                    self.on_hold(True)  # the run's timer stops until the hold ends
                 last = t
             next_step += period
             delay = next_step - time.perf_counter()
@@ -549,6 +593,9 @@ class Run:
         self.started = self.active = False
         self.t0 = None
         self.accumulated, self.segment_start, self.segment_start_elapsed = 0.0, None, 0.0
+        # goal task: the timer stops while the hand holds still at a reached goal (goal_hold_s): seconds held in the
+        # running stretch, and the wall time the hold going on began (None: no hold)
+        self.held, self.hold_since = 0.0, None
         self.segments = []         # (policy seconds, temperatures at start, at end) per uninterrupted stretch
         self.heat_pauses = self.pauses = self.stops = 0
         self.trace, self.detection_elapsed = [], []
@@ -559,20 +606,40 @@ class Run:
     def begin(self, temps):
         self.started, self.t0, self.start_temps = True, time.time(), temps
 
+    def _held(self, t):
+        """Seconds held at goals in the running stretch up to wall time t."""
+        since = self.hold_since
+        return self.held + (max(0.0, t - since) if since is not None else 0.0)
+
+    def elapsed_at(self, t):
+        """Policy time at wall time t (the running stretch; holds at goals do not count)."""
+        return self.accumulated + t - self.segment_start - self._held(t)
+
     def elapsed(self):
-        """Policy time: seconds the policy has run."""
+        """Policy time: seconds the policy has run (holds at goals do not count)."""
         if self.active:
-            return self.accumulated + time.time() - self.segment_start
+            return self.elapsed_at(time.time())
         return self.accumulated
+
+    def set_hold(self, on):
+        """From the policy loop: the hand starts (True) or ends (False) holding still at a reached goal."""
+        now = time.time()
+        if on and self.hold_since is None:
+            self.hold_since = now
+        elif not on and self.hold_since is not None:
+            self.held += now - self.hold_since
+            self.hold_since = None
 
     def resume(self):
         self.segment_start, self.segment_start_elapsed = time.time(), self.accumulated
+        self.held, self.hold_since = 0.0, None
         self.active = True
         self.counter.rebase()
 
     def pause(self):
         if self.active:
-            self.accumulated += time.time() - self.segment_start
+            self.accumulated = self.elapsed_at(time.time())
+            self.held, self.hold_since = 0.0, None
             self.active = False
 
     def detection(self, stamp, position, rotation, pixel):
@@ -580,7 +647,7 @@ class Run:
             return
         elapsed = ""
         if self.active and stamp >= self.segment_start:
-            elapsed = self.accumulated + stamp - self.segment_start
+            elapsed = self.elapsed_at(stamp)
             self.counter.add(elapsed, rotation)
             self.detection_elapsed.append(elapsed)
             elapsed = round(elapsed, 3)
@@ -947,6 +1014,14 @@ class Demo:
             self.status["temps"] = None if temps is None else temps.tolist()
             if self.run is not None:
                 self.status.update(self.run.figures(self.hand.goal_log))
+            # goal task: a banner while the hand holds still at a reached goal (dashboard and video); only this
+            # banner is cleared here, not one of set_state()
+            hold_s = getattr(self.hand, "goal_hold_s", 0.0) if self.hand is not None else 0.0
+            hold_banner = f"GOAL REACHED - holding {hold_s:g} s" if hold_s else None
+            if self.hand is not None and getattr(self.hand, "holding", False):
+                self.status.update(banner=hold_banner, banner_color="green")
+            elif hold_banner and self.status.get("banner") == hold_banner:
+                self.status.update(banner=None)
             self.status.update(self.dashboard_status())
             self.status_q.put(dict(self.status))
         if sleep:
@@ -1147,8 +1222,21 @@ class Demo:
         from cube_spin_policy import CubeSpinPolicy, axis_in_camera
         a, hand = self.args, self.hand
         speed = 0.0 if self.kind == "goals" else speed_for(a, axis)
+        goals = {}
+        if self.kind == "goals":
+            mode = a.goal_mode
+            if mode is None:
+                try:
+                    info = json.loads(Path(a.policy).with_suffix(".json").read_text()).get("training") or {}
+                    mode = ((info.get("commands") or {}).get("object_pose") or {}).get("goal_mode")
+                except (OSError, ValueError):
+                    mode = None
+            goals = dict(goal_mode=mode or "uniform")
+            log(f"  goals: {goals['goal_mode']}, the hand holds still {a.goal_hold_s:g} s at every goal reached")
         policy = CubeSpinPolicy(a.policy, self.joint_ids, goal_ang_vel=speed, use_cube_pose=None,
-                                action_alpha=a.action_alpha, axis=axis, goal_tolerance=a.goal_tolerance)
+                                action_alpha=a.action_alpha, axis=axis, goal_tolerance=a.goal_tolerance, **goals)
+        if policy.goals is not None:
+            policy.goals.hold = a.goal_hold_s > 0  # a reached goal stays until the hand has held still
         t_warm = time.perf_counter()
         warm_up(policy)
         warm_ms = (time.perf_counter() - t_warm) * 1000
@@ -1186,7 +1274,8 @@ class Demo:
             self.status.update(record=str(run_dir / "video.mp4") if a.record_video else None)
             while run.elapsed() < a.duration:
                 segment_temps = hand.temperatures()
-                hand.start_policy(policy, run.elapsed, a.duration)  # torque on first: policy time from the first step
+                hand.start_policy(policy, run.elapsed, a.duration,  # torque on first: policy time from the first step
+                                  goal_hold_s=a.goal_hold_s, on_hold=run.set_hold)
                 run.resume()
                 self.status.update(running=True, record_on=True)
                 self.set_state("running")

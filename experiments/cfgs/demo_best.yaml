@@ -1,0 +1,84 @@
+# Demo mode of the ORCA v2 hand: everything demo.py runs, in one place.
+#
+#   python experiments/rl_inference/demo.py --mode proprio      # proprio.use_camera: with or without the camera
+#   python experiments/rl_inference/demo.py --mode extero       # camera plugged in
+#   python experiments/rl_inference/demo.py --mode optional     # optional.task below (or --task axes|goals)
+#
+# Every demo runs `repeats` runs of `duration_s` seconds of policy time with the same policy (optional/axes: one run
+# per entry of `axes`). Drop detection is off: the policy keeps running when the cube falls (P parks the hand so the
+# cube can be put back). Paths are relative to the repository root, or absolute.
+#
+# demo_best.yaml (Ben, 2026-11-16, on David's demo.py of 35149e7): our best models of the 15 Nov sessions, each with
+# its own servo ramp and current (so config.yaml does not have to be edited between modes):
+#   proprio  rooster_acc0chirp_9000: 34.1 (1200 mA), 34.5 (1300 mA), mean 33.6 over 12 runs; 2.4 rad/s, acc 0
+#   extero   extero_rooster_8500: 33.2, 31.9; 2.4 rad/s, acc 0 (alternative bat_10250: 33.3, one run)
+#   optional lemur_ibexz_a02 (axes): +x 11.8, -y 8.4, +z 17.3 at ramp 150, alpha 0.2 (before: lemur at ramp 150: +x 9.2-12.1, -y 6.6-8.8, +z 5.6 turns; manta face90: 14 goals (best), ramp 150
+#
+# demo.yaml's defaults: the settings of the best measured runs on the real hand (logs/real_eval/results.csv, 2026-11-15):
+# rooster_new 30.5 turns and extero_ibex_aramp05_acc250 20.5 turns, both at 2.0 rad/s, action alpha 0.5, with the hand
+# controller brought up at servo acc 0 (no ramp; node_logs/hand_controller.log).
+
+common:
+  duration_s: 60          # seconds of policy time per run (pauses do not count)
+  repeats: 3              # runs per demo (optional/axes: one per axis instead)
+  start_temp_c: 38.0      # a run starts only when every motor is at most this warm (the evaluation: 42.5)
+  temp_limit_c: 65.0      # a motor this hot during a run: torque off, the run goes on after cooling
+  temp_margin_c: 2.0      # ... and only when no motor is expected to get within this of the limit
+  countdown_s: 3          # after SPACE
+  start_wrist_deg: null   # start pose wrist angle; null: flexed, 2 deg before its limit (as the evaluation)
+  out: logs/demo          # results.csv, thermal_history.json and a folder per session
+  record_video: true      # the camera view of every run (modes with a camera)
+  fullscreen: true        # the dashboard full screen (F toggles)
+  twin: true              # the perceived state: the hand in its measured pose (the big picture in proprio without
+                          # the camera; in extero and optional with the cube where the policy sees it); never in
+                          # proprio with the camera
+  torch_threads: 1        # threads of the policy's inference: 1 is fastest for these small networks and leaves the
+                          # other cores to the camera, the detector and the hand controller
+  cube_edge: 0.045
+
+# The camera setup of extero, optional and proprio with use_camera (sections inherit these unless they set their
+# own; proprio counts the turns about the camera's viewing axis and needs no calibration).
+camera:
+  calibration: ~/camera_extrinsics.npy          # cam_T_tag from apriltag_calibration.py, made where the camera is now
+  hand_to_tag: [0.0, -0.04, 0.423, 60.0, 0.0, 0.0]   # m, deg (as eval_extero.sh)
+  exposure_us: 5000
+  iso: 400
+
+proprio:
+  model: models_proprio/rooster_acc0chirp_9000_policy.pt
+  use_camera: false       # true: the camera is plugged in (if the TAs allow it): its view, the cube's turns and a
+                          # video, as extero, instead of the perceived state; the policy still gets no cube pose
+  servo_acc: 0            # raw ACC register (0 = no ramp, max 254); null: config.yaml's servo_acceleration_raw
+  max_current: 1200       # goal-current limit of every motor in mA (clamped to the motor's ceiling); null: config.yaml's
+                          # max_current ("default" there: 900 mA)
+  action_alpha: 0.5       # must be the policy's training value (its .json)
+  speed: 2.4              # commanded spin speed (rad/s; the sign is the direction); top of its training curriculum
+
+extero:
+  model: models_extero/extero_rooster_8500_policy.pt     # or models_extero/bat_10250_policy.pt
+  servo_acc: 0
+  max_current: 1200
+  action_alpha: 0.5
+  speed: 2.4
+
+optional:
+  task: axes              # axes | goals (--task overrides)
+  axes:                   # one run per axis, the spin commanded about it (all-axes policy)
+    model: models_proprio/lemur_ibexz_a02_policy.pt   # 16 Nov: +x 11.8, -y 8.4, +z 17.3 at ramp 150 / alpha 0.2 (lemur: 9-12, 7-10, 5.6)
+    servo_acc: 150        # lemur works only with the ramp (0: stalls)
+    max_current: 1200
+    action_alpha: 0.2
+    speed: {x: 1.0, y: 1.0, z: 2.2}   # rad/s, one for all axes or one per axis ({x: 1.0, y: 1.0, z: 1.5}); null: the top of the
+                          # model's training range about each axis
+    direction: {x: 1, y: -1, z: 1}    # lemur's good directions on the hand (+x, -y, +z); +1 or -1: the sign of the spin, one for all axes or one per axis ({x: 1, y: -1, z: 1});
+                          # overrides the sign of speed (+ = counter-clockwise about the axis, right-hand rule)
+    axes: [x, y, z]
+  goals:                  # the goal task: random goal orientations, `repeats` runs (no direction)
+    model: models_proprio/manta_policy.pt
+    servo_acc: 150
+    max_current: 900      # manta's best runs (14 goals) ran at config.yaml's 'default' = 900 mA; 1200 mA: fewer goals
+    action_alpha: 0.2
+    goal_tolerance: 0.4   # rad: a goal counts as reached within this
+    goal_mode: face90     # each goal 90 deg from the last (manta's 14 goals); uniform: random orientations (Ben's
+                          # addition to demo.py; null: the model's .json)
+    goal_hold_s: 2.0      # s the hand holds still when the cube reached a goal, before the next goal (0: at once)
