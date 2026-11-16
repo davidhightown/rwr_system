@@ -252,22 +252,66 @@ class CubePose:
 
 
 class GoalOrientations:
-    """The goals of the goal task (orca-v2-inhand-goal-v0, after DeXtreme): uniformly random orientations of the cube in
-    the frame the simulation observes it in, the next one as soon as the tracked orientation is within ``tolerance``
-    (rad) of the goal. The observation (8) is the goal (w, x, y, z) and the rotation from the goal to the tracked
-    orientation, tracked * conj(goal), both with w >= 0, as cube_pose_tracked_goal in faive_lab computes them."""
+    """The goals of the goal task (orca-v2-inhand-goal-v0, after DeXtreme), in the frame the simulation observes the cube
+    in, the next one as soon as the tracked orientation is within ``tolerance`` (rad) of the goal. The observation (8)
+    is the goal (w, x, y, z) and the rotation from the goal to the tracked orientation, tracked * conj(goal), both with
+    w >= 0, as cube_pose_tracked_goal in faive_lab computes them.
 
-    def __init__(self, tolerance=GOAL_TOLERANCE_RAD, seed=None):
+    mode "uniform": uniformly random orientations (manta). mode "face90" (manta_v4, OrientationGoalCommand): the next
+    goal is the goal just reached turned by +-90 deg about the x, y or z axis of that frame (axis_probs); after a reset
+    the first goal is the cube's orientation turned so, taken at the first step with a tracked cube. turns (face90
+    only): the allowed turns as (axis 0-2, sign +-1), e.g. [(0, 1)] for +90 deg about x only, so that the goals chain
+    into a continuous rotation about x; None: all six (axis_probs, either sign)."""
+
+    MODES = ("uniform", "face90")
+
+    def __init__(self, tolerance=GOAL_TOLERANCE_RAD, seed=None, mode="uniform", axis_probs=None, turns=None):
+        if mode not in self.MODES:
+            raise ValueError(f"goal mode {mode!r}: one of {self.MODES}")
         self.tolerance = float(tolerance)
+        self.mode = mode
+        p = np.ones(3) if axis_probs is None else np.asarray(axis_probs, dtype=float)
+        self.axis_probs = p / p.sum()
+        self.turns = None if turns is None else [(int(a), float(sg)) for a, sg in turns]
         self.rng = np.random.default_rng(seed)
         self.reached = 0    # goals reached since the start (a reset does not change it)
         self.error = None   # rad from the tracked orientation to the goal at the last step
-        self.quat = None
+        self.quat = None    # None (face90 after a reset): set at the next step with a tracked cube
+        # hold: a reached goal stays the goal (waiting) until advance(), e.g. while the demo holds the hand still;
+        # False: the next goal at once (as in the simulation)
+        self.hold = False
+        self.waiting = False
         self.new_goal()
 
+    def advance(self):
+        """hold: the next goal after the one reached (nothing if no goal is waiting)."""
+        if self.waiting:
+            self.waiting = False
+            self._next_goal()
+
     def new_goal(self):
+        """A goal as after a reset."""
+        self.error = None
+        self.waiting = False
+        if self.mode == "face90":
+            self.quat = None
+            return
         q = self.rng.normal(size=4)  # a normalised 4D Gaussian is uniform over the rotations
         self.quat = unique(q / np.linalg.norm(q)).astype(np.float32)
+
+    def _face_turn(self, base_quat):
+        if self.turns:
+            a, sign = self.turns[self.rng.integers(len(self.turns))]
+        else:
+            a, sign = self.rng.choice(3, p=self.axis_probs), self.rng.choice((-1.0, 1.0))
+        turn = Rotation.from_rotvec(sign * np.pi / 2 * np.eye(3)[a])
+        return unique(wxyz(turn * rotation_of(base_quat))).astype(np.float32)  # about the frame's axis
+
+    def _next_goal(self):
+        if self.mode == "face90":
+            self.quat = self._face_turn(self.quat)
+        else:
+            self.new_goal()
 
     def _to_goal(self, cube_quat):
         rotation = rotation_of(cube_quat) * rotation_of(self.quat).inv()
@@ -276,11 +320,21 @@ class GoalOrientations:
 
     def observation(self, cube_pose):
         """The 8 values for a CubePose.observation(); first the next goal if the tracked cube reached this one."""
+        tracked = cube_pose[7] > 0.5
+        if self.quat is None:
+            if not tracked:  # face90 before the first tracked pose: the goal is where the cube is (no progress asked)
+                q = unique(np.asarray(cube_pose[3:7], dtype=np.float32))
+                self.error = None
+                return np.concatenate([q, [1.0, 0.0, 0.0, 0.0]]).astype(np.float32)
+            self.quat = self._face_turn(cube_pose[3:7])
         to_goal = self._to_goal(cube_pose[3:7])
-        if cube_pose[7] > 0.5 and self.error < self.tolerance:
+        if tracked and self.error < self.tolerance and not self.waiting:
             self.reached += 1
-            self.new_goal()
-            to_goal = self._to_goal(cube_pose[3:7])
+            if self.hold:
+                self.waiting = True  # the goal stays until advance()
+            else:
+                self._next_goal()
+                to_goal = self._to_goal(cube_pose[3:7])
         return np.concatenate([self.quat, to_goal]).astype(np.float32)
 
 
@@ -290,12 +344,14 @@ class CubeSpinPolicy:
     use_cube_pose: True for a policy of the extero task, False for one of the proprioceptive task (the two layouts of
     the ROS node), None = whatever layout of LAYOUTS the policy takes (step() then needs the cube pose if the layout
     has it). axis: the axis of the goal angular velocity (all-axes task). A policy of the goal task gets the goal
-    orientations of ``goals`` (GoalOrientations with goal_tolerance, default GOAL_TOLERANCE_RAD, and seed). A recurrent
+    orientations of ``goals`` (GoalOrientations with goal_tolerance, default GOAL_TOLERANCE_RAD, seed and
+    goal_mode, uniform or face90). A recurrent
     policy's memory is cleared at every reset().
     """
 
     def __init__(self, policy_path, joint_order, goal_ang_vel=1.0, action_alpha=0.2, velocity_obs_scale=0.2,
-                 use_cube_pose=False, axis="z", goal_tolerance=None, seed=None):
+                 use_cube_pose=False, axis="z", goal_tolerance=None, seed=None, goal_mode="uniform",
+                 goal_turns=None):
         self.joint_order = list(joint_order)  # the hand driver's order (config.yaml joint_ids)
         self.joint_order_usd = list(JOINT_LIMITS_USD_DEG)
         if set(self.joint_order) != set(self.joint_order_usd):
@@ -321,7 +377,8 @@ class CubeSpinPolicy:
         self.recurrent = is_recurrent(self.policy)
         self.goals = None
         if "goal_orientation" in self.layout.terms:
-            self.goals = GoalOrientations(GOAL_TOLERANCE_RAD if goal_tolerance is None else goal_tolerance, seed)
+            self.goals = GoalOrientations(GOAL_TOLERANCE_RAD if goal_tolerance is None else goal_tolerance, seed,
+                                          goal_mode, turns=goal_turns)
         with torch.no_grad():
             out = self.policy(torch.zeros(1, self.obs_dim))
         if out.shape[-1] != NUM_JOINTS:

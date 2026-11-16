@@ -655,8 +655,13 @@ class Evaluation:
         from cube_spin_policy import CubeSpinPolicy
         a = self.args
         name = policy_path.stem.removesuffix("_policy")
+        goal_mode = a.goal_mode or (((training_info(policy_path).get("commands") or {}).get("object_pose") or {})
+                                    .get("goal_mode") or "uniform")
         policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed, use_cube_pose=None,
-                                action_alpha=a.action_alpha, axis=a.axis, goal_tolerance=a.goal_tolerance)
+                                action_alpha=a.action_alpha, axis=a.axis, goal_tolerance=a.goal_tolerance,
+                                goal_mode=goal_mode, goal_turns=parse_goal_turns(a.goal_turns))
+        if policy.goals is not None:
+            print(f"Goals: {goal_mode}" + (f", turns {a.goal_turns}" if a.goal_turns else ""))
         run_dir = self.out / f"{datetime.now():%Y%m%d_%H%M%S}_{name}"
         run_dir.mkdir(parents=True)
         run = Run(name, policy_path, run_dir, a, self.joint_ids, policy, self.hand_T_camera)
@@ -1167,6 +1172,12 @@ def parse_args(argv=None):
                    "with that one.")
     p.add_argument("--goal-tolerance", type=float, help="With --mode goals: a goal orientation counts as reached "
                    "within this angle (rad; default 0.4, DeXtreme's test tolerance).")
+    p.add_argument("--goal-mode", choices=("uniform", "face90"), help="With --mode goals: how the goals are drawn: "
+                   "uniform (random orientations, manta) or face90 (each goal the last one turned by 90 deg about x, y "
+                   "or z, manta_v4). Default: the goal_mode of the model's training (its .json), else uniform.")
+    p.add_argument("--goal-turns", help="With --goal-mode face90: only these 90 deg turns, comma-separated axis and "
+                   "sign in the simulation's frame, e.g. x+ (each goal the last one turned +90 deg about x: a "
+                   "continuous rotation about x made of goals; 4 goals = 1 turn) or x+,x-. Default: all six.")
     p.add_argument("--goal-timeout", type=float, help="With --mode goals: end the run after this many seconds of "
                    "policy time without a goal reached (default 80).")
     p.add_argument("--out", default=str(REPO / "logs/real_eval"), help="Results folder.")
@@ -1255,8 +1266,8 @@ def parse_args(argv=None):
         p.error("--axis goes with --mode all-axes")
     if args.axis != "z" and args.calibration is None and not args.mock:
         p.error(f"--axis {args.axis}: counting the turns about it needs --calibration")
-    if (args.goal_tolerance is not None or args.goal_timeout is not None) and args.mode != "goals":
-        p.error("--goal-tolerance and --goal-timeout go with --mode goals")
+    if (args.goal_tolerance is not None or args.goal_timeout is not None or args.goal_mode or args.goal_turns) and args.mode != "goals":
+        p.error("--goal-tolerance, --goal-timeout, --goal-mode and --goal-turns go with --mode goals")
     if args.goal_timeout is None:
         args.goal_timeout = 80.0
     if args.duration is None:
@@ -1272,6 +1283,18 @@ def model_file(path, models_dir):
         if candidate.is_file():
             return candidate
     return path
+
+
+def parse_goal_turns(text):
+    """--goal-turns "x+,y-" -> [(0, 1.0), (1, -1.0)]; None for None."""
+    if not text:
+        return None
+    turns = []
+    for item in text.replace(" ", "").split(","):
+        if len(item) != 2 or item[0] not in "xyz" or item[1] not in "+-":
+            raise SystemExit(f"--goal-turns: {item!r} is not an axis and a sign like x+")
+        turns.append(("xyz".index(item[0]), 1.0 if item[1] == "+" else -1.0))
+    return turns
 
 
 def training_info(policy_path):

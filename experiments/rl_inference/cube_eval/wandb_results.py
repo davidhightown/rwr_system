@@ -60,7 +60,8 @@ FILES = ("meta.json", "turns.csv", "trace.csv", "joints.csv", "joint_tracking.cs
 OBS_DIM_PROPRIO = 74  # a run's policy takes more observations: it has the cube pose (cube_spin_policy.py)
 VIDEO = "video.mp4"
 VIDEO_KEY = "eval/video"  # a wandb.Video: plays in the run's media panel (a file under Files does not)
-UPLOADED_OUTCOMES = ("completed", "too many drops")  # the others say nothing about the policy
+UPLOADED_OUTCOMES = ("completed", "too many drops", "no progress")  # the others say nothing about the policy;
+# "no progress" (goal task: no goal within --goal-timeout) is a result of the policy
 
 # results.csv column of eval_policies.py -> summary key
 SUMMARY = {
