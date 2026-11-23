@@ -21,8 +21,8 @@
 common:
   duration_s: 60          # seconds of policy time per run (pauses do not count)
   repeats: 3              # runs per demo (optional/axes: one per axis instead)
-  start_temp_c: 38.0      # a run starts only when every motor is at most this warm (the evaluation: 42.5)
-  temp_limit_c: 65.0      # a motor this hot during a run: torque off, the run goes on after cooling
+  start_temp_c: 45.0      # a run starts only when every motor is at most this warm (the evaluation: 42.5)
+  temp_limit_c: 70.0      # a motor this hot during a run: torque off, the run goes on after cooling
   temp_margin_c: 2.0      # ... and only when no motor is expected to get within this of the limit
   countdown_s: 3          # after SPACE
   start_wrist_deg: null   # start pose wrist angle; null: flexed, 2 deg before its limit (as the evaluation)
@@ -38,15 +38,15 @@ common:
 
 # The camera setup of extero, optional and proprio with use_camera (sections inherit these unless they set their
 # own; proprio counts the turns about the camera's viewing axis and needs no calibration).
-camera:
+camera: 
   calibration: ~/camera_extrinsics.npy          # cam_T_tag from apriltag_calibration.py, made where the camera is now
   hand_to_tag: [0.0, -0.04, 0.423, 60.0, 0.0, 0.0]   # m, deg (as eval_extero.sh)
   exposure_us: 5000
-  iso: 400
+  iso: 800
 
 proprio:
   model: models_proprio/rooster_acc0chirp_9000_policy.pt
-  use_camera: false       # true: the camera is plugged in (if the TAs allow it): its view, the cube's turns and a
+  use_camera: true        # the camera counts the turns and records a video (the policy still gets no cube pose)
                           # video, as extero, instead of the perceived state; the policy still gets no cube pose
   servo_acc: 0            # raw ACC register (0 = no ramp, max 254); null: config.yaml's servo_acceleration_raw
   max_current: 1200       # goal-current limit of every motor in mA (clamped to the motor's ceiling); null: config.yaml's

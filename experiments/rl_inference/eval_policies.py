@@ -139,7 +139,7 @@ class Skip(Exception):
 class HandLink:
     """The ROS side: the hand controller's topics and torque service, and the policy loop at 20 Hz."""
 
-    def __init__(self, joint_ids, cube_pose_timeout):
+    def __init__(self, joint_ids, cube_pose_timeout, policy_hz=POLICY_HZ):
         from cube_spin_policy import CubePose
         from rclpy.callback_groups import ReentrantCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
@@ -164,8 +164,9 @@ class HandLink:
         self.cube = CubePose(cube_pose_timeout)  # the cube pose for policies of the extero task
         self.cube_log = []      # (policy time, cube pose observation) while such a policy runs
         self.goal_log = []      # policy time of every goal orientation reached (--mode goals)
-        self.step_times = deque(maxlen=2 * int(POLICY_HZ))  # wall times of the last policy steps (loop rate)
-        self.infer_ms = deque(maxlen=2 * int(POLICY_HZ))    # their computation times
+        self.policy_hz = float(policy_hz)  # the policy loop's rate (--policy-hz; the policies were trained at 20 Hz)
+        self.step_times = deque(maxlen=2 * int(self.policy_hz))  # wall times of the last policy steps (loop rate)
+        self.infer_ms = deque(maxlen=2 * int(self.policy_hz))    # their computation times
         self.torque_on = None
 
         self.node = Node("cube_spin_evaluation")
@@ -180,7 +181,7 @@ class HandLink:
         sub(Int32MultiArray, "motor_status", self._status)
         self.command_pub = self.node.create_publisher(Float32MultiArray, "/right/hand/policy_output", 10)
         self.torque_client = self.node.create_client(SetBool, "/right/hand/set_torque_enabled", callback_group=group)
-        self.node.create_timer(1.0 / POLICY_HZ, self._policy_step, callback_group=group)
+        self.node.create_timer(1.0 / self.policy_hz, self._policy_step, callback_group=group)
         self.executor = MultiThreadedExecutor(num_threads=3)
         self.executor.add_node(self.node)
         threading.Thread(target=self.executor.spin, daemon=True).start()
@@ -416,7 +417,7 @@ class Evaluation:
 
     def start_hand(self):
         self.init_ros()
-        self.hand = HandLink(self.joint_ids, self.args.cube_pose_timeout)
+        self.hand = HandLink(self.joint_ids, self.args.cube_pose_timeout, self.args.policy_hz)
         a = self.args
         if not a.no_hand_launch:
             log_dir = self.out / "node_logs"
@@ -658,8 +659,12 @@ class Evaluation:
         goal_mode = a.goal_mode or (((training_info(policy_path).get("commands") or {}).get("object_pose") or {})
                                     .get("goal_mode") or "uniform")
         policy = CubeSpinPolicy(policy_path, self.joint_ids, goal_ang_vel=speed, use_cube_pose=None,
-                                action_alpha=a.action_alpha, axis=a.axis, goal_tolerance=a.goal_tolerance,
+                                action_alpha=step_alpha(a), axis=a.axis, goal_tolerance=a.goal_tolerance,
                                 goal_mode=goal_mode, goal_turns=parse_goal_turns(a.goal_turns))
+        if a.policy_hz != POLICY_HZ:
+            print(f"Policy loop at {a.policy_hz:g} Hz (trained at {POLICY_HZ:g} Hz); action alpha {step_alpha(a):.3f} per "
+                  "step" + (" (as given: --plain-alpha)" if a.plain_alpha else
+                            f" (= {a.action_alpha:g} per {1000 / POLICY_HZ:.0f} ms, the training's smoothing time)"))
         if policy.goals is not None:
             print(f"Goals: {goal_mode}" + (f", turns {a.goal_turns}" if a.goal_turns else ""))
         run_dir = self.out / f"{datetime.now():%Y%m%d_%H%M%S}_{name}"
@@ -1170,6 +1175,12 @@ def parse_args(argv=None):
     p.add_argument("--action-alpha", type=float, default=0.2, help="Moving average of the action term (the task's "
                    "alpha). A policy trained with another one (its .json from download_policies.py says so) runs only "
                    "with that one.")
+    p.add_argument("--policy-hz", type=float, default=POLICY_HZ, help="Rate of the policy loop (Hz). The policies "
+                   "were trained at 20 Hz; another rate is an experiment (the policy's actions then come more or less "
+                   "often than in training). The action alpha is converted to the same smoothing time per second "
+                   "unless --plain-alpha.")
+    p.add_argument("--plain-alpha", action="store_true", help="With --policy-hz: use --action-alpha per step as given "
+                   "(the hand then follows the actions faster at a higher rate than in training).")
     p.add_argument("--goal-tolerance", type=float, help="With --mode goals: a goal orientation counts as reached "
                    "within this angle (rad; default 0.4, DeXtreme's test tolerance).")
     p.add_argument("--goal-mode", choices=("uniform", "face90"), help="With --mode goals: how the goals are drawn: "
@@ -1268,6 +1279,10 @@ def parse_args(argv=None):
         p.error(f"--axis {args.axis}: counting the turns about it needs --calibration")
     if (args.goal_tolerance is not None or args.goal_timeout is not None or args.goal_mode or args.goal_turns) and args.mode != "goals":
         p.error("--goal-tolerance, --goal-timeout, --goal-mode and --goal-turns go with --mode goals")
+    if not 5.0 <= args.policy_hz <= 100.0:
+        p.error("--policy-hz: from 5 to 100 Hz")
+    if args.plain_alpha and args.policy_hz == POLICY_HZ:
+        p.error("--plain-alpha goes with --policy-hz other than 20")
     if args.goal_timeout is None:
         args.goal_timeout = 80.0
     if args.duration is None:
@@ -1283,6 +1298,14 @@ def model_file(path, models_dir):
         if candidate.is_file():
             return candidate
     return path
+
+
+def step_alpha(a):
+    """The action alpha per policy step: --action-alpha (the training's, per 50 ms step) converted to --policy-hz so
+    that the moving average has the same time constant, or as given with --plain-alpha."""
+    if a.plain_alpha or a.policy_hz == POLICY_HZ:
+        return a.action_alpha
+    return 1.0 - (1.0 - a.action_alpha) ** (POLICY_HZ / a.policy_hz)
 
 
 def parse_goal_turns(text):
