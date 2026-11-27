@@ -1,18 +1,21 @@
 """
-Check the motor -> joint map of an ORCA hand, one motor at a time, before the first calibration.
+Check the motor -> joint map (which motor moves which joint, and in which direction) of an ORCA hand,
+one motor at a time. Run it after tensioning and before the first calibration; it needs no calibration.
 
-For each motor the script names the joint that should move and turns only that motor once (+, i.e. motor
-angle increasing; if that is blocked, the other way), holds it there and asks with a single key what you
-see. Then the motor goes back and the next one starts. All other motors stay without torque.
+For each motor the script names the joint to watch and moves only that motor, twice:
+MOVE 1 (motor angle increasing) and back, then MOVE 2 (the opposite way) and back. It then asks about one
+of the moves, MOVE 1 unless that one was blocked, and you answer with a single key. All other motors stay
+without torque.
 
-Your answers go to ~/orca_motor_check/<hand>_<time>.yaml, with the sign each one implies for
-joint_to_motor_map. Positive joint angles (ORCA convention): fingers and thumb bend (close); sideways
-(abduction) towards the pinky side (the neutral pose fans the index towards the thumb, the pinky outwards).
+Your answers are saved to ~/orca_motor_check/<hand>_<time>.yaml. At the end, the script lists every motor
+that moved a wrong joint and the sign fixes for joint_to_motor_map in config.yaml. Directions (ORCA
+convention, positive joint angle): bending joints bend, sideways joints move towards the pinky side. The
+thumb base, thumb sideways and the wrist are only recorded, since their positive direction is not checked.
 
-Needs no calibration. Stop the hand controller node first: both need the hand's serial port.
+Stop the hand controller node first: both need the hand's serial port.
 
-    python motor_check.py --hand baby                 # all motors except the wrist
-    python motor_check.py --hand baby --motors 15 4   # only these
+    python motor_check.py --hand baby                 # every motor except the wrist
+    python motor_check.py --hand baby --motors 15 4   # only these motors
     python motor_check.py --hand baby --wrist         # the wrist too (the whole hand swings)
 """
 import argparse
@@ -50,49 +53,55 @@ BABY_TENDONS = {
     17: ("T-TP", "15 T-TP-flex", "14 T-TP-ext"),
 }
 
-FINGER_NAMES = {"thumb": "Thumb", "index": "Index finger", "middle": "Middle finger", "ring": "Ring finger",
-                "pinky": "Pinky"}
+FINGER_NAMES = {"thumb": "thumb", "index": "index finger", "middle": "middle finger", "ring": "ring finger",
+                "pinky": "pinky"}
 PART_NAMES = {"abd": "sideways", "mcp": "knuckle (base joint)", "pip": "middle joint", "dip": "tip joint",
-              "cmc": "base (rotation towards the palm)", "wrist": "tilt"}
-
-# The question per kind of joint: (key, answer text, joint direction: +1 = positive joint angle, None = unknown)
-QUESTIONS = {
-    "bend": [("c", "bent / closed", 1), ("o", "straightened / opened", -1)],
-    "side": [("p", "towards the PINKY side", 1), ("t", "towards the THUMB side", -1)],
-    "thumb": [("c", "closed: towards the palm / the fingers", None), ("o", "opened: away from the palm", None)],
-    "wrist": [("c", "tilted towards the palm", None), ("o", "tilted towards the back of the hand", None)],
+              "cmc": "base"}
+# The two answers per joint: (text for key 1, text for key 2, joint direction of answer 1: +1 positive, None unknown)
+BEND = ("bent / closed", "straightened / opened", 1)
+SIDEWAYS = {  # named by the neighbouring finger; positive = towards the pinky side of the hand
+    "index": ("towards the MIDDLE finger", "away from the middle finger, towards the thumb", 1),
+    "middle": ("towards the RING finger", "towards the INDEX finger", 1),
+    "ring": ("towards the PINKY", "towards the MIDDLE finger", 1),
+    "pinky": ("away from the ring finger (outwards)", "towards the RING finger", 1),
 }
-OTHER = [("n", "nothing moved", None), ("w", "a DIFFERENT joint moved", None), ("r", "repeat the move", None),
-         ("s", "skip this motor", None), ("q", "quit", None)]
+THUMB_BASE = ("towards the palm / the index finger", "away from the palm", None)
+WRIST = ("tilted towards the palm", "tilted towards the back of the hand", None)
+OTHER = [("n", "nothing moved / not sure"), ("w", "a DIFFERENT joint moved"), ("r", "show both moves again"),
+         ("s", "skip this motor"), ("q", "quit (the answers so far are saved)")]
+BLOCKED_FRACTION = 0.4  # a move that gets less than this share of --amplitude counts as blocked
 BG = {"ok": "\033[42;30m", "bad": "\033[41;97m", "info": "\033[44;97m"}
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 
 
-def kind_of(joint):
+def answers_for(joint):
     finger, part = joint.split("_")[0], joint.split("_")[-1]
     if joint == "wrist":
-        return "wrist"
+        return WRIST
     if finger == "thumb" and part in ("abd", "cmc"):
-        return "thumb"
-    return "side" if part == "abd" else "bend"
+        return THUMB_BASE
+    if part == "abd":
+        return SIDEWAYS[finger]
+    return BEND
 
 
 def joint_label(joint):
     if joint == "wrist":
-        return "Wrist tilt"
+        return "the wrist"
     finger, part = joint.split("_")[0], joint.split("_")[-1]
-    return f"{FINGER_NAMES.get(finger, finger)} {PART_NAMES.get(part, part)}"
+    return f"the {FINGER_NAMES.get(finger, finger)} {PART_NAMES.get(part, part)}"
 
 
 def getkey(allowed):
-    """One key press without Enter (falls back to a line when stdin is not a terminal)."""
+    """One key press without Enter (a line when stdin is not a terminal)."""
     if not sys.stdin.isatty():
         while True:
             line = sys.stdin.readline()
             if not line:
                 raise KeyboardInterrupt
-            if line.strip().lower()[:1] in allowed:
-                return line.strip().lower()[:1]
+            key = line.strip().lower()[:1] or "\n"  # an empty line is Enter
+            if key in allowed:
+                return key
     import termios
     import tty
     fd = sys.stdin.fileno()
@@ -113,14 +122,13 @@ def move(hand, motor, start, target, speed_deg_s):
     """Half-cosine move of one motor from start to target (rad); returns where it got (rad) and the peak mA."""
     index = hand.config.motor_ids.index(motor)
     duration = max(abs(math.degrees(target - start)) / speed_deg_s, 0.2)
-    peak, pos = 0.0, start
+    peak = 0.0
     t0 = time.time()
     while True:
         s = min((time.time() - t0) / duration, 1.0)
         hand.write_motor_pos([motor], np.array([start + (target - start) * (1 - math.cos(math.pi * s)) / 2]))
         time.sleep(0.02)
         state = hand.get_motor_state()
-        pos = float(state.position[index])
         if state.current is not None:
             peak = max(peak, abs(float(state.current[index])))
         if s >= 1.0:
@@ -129,43 +137,66 @@ def move(hand, motor, start, target, speed_deg_s):
     return float(hand.get_motor_state().position[index]), peak
 
 
-def swing_out(hand, motor, amplitude, speed):
-    """Move + (or - when + is blocked) and hold there. Returns (start, direction used, reached deg, peak mA)."""
+def show_moves(hand, motor, amplitude, speed):
+    """MOVE 1 (+) and back, MOVE 2 (-) and back; returns the motor degrees each move reached."""
     start = float(hand.get_motor_pos(as_dict=True)[motor])
     hand.write_motor_pos([motor], np.array([start]))
     hand.enable_torque([motor])
-    for direction in (1, -1):
-        pos, peak = move(hand, motor, start, start + direction * amplitude, speed)
-        reached = math.degrees(pos - start)
-        if abs(reached) >= 0.4 * math.degrees(amplitude):
-            return start, direction, reached, peak
-        move(hand, motor, pos, start, speed)
-        if direction > 0:
-            print(f"   blocked this way ({reached:+.0f} deg, {peak:.0f} mA). {BOLD}Watch again{RESET}: "
-                  "it now moves the other way...")
-            time.sleep(1.0)
-    return start, -1, reached, peak
+    reached = {}
+    try:
+        for number, direction in ((1, 1), (2, -1)):
+            print(f"   {BOLD}MOVE {number}{RESET}{' (the opposite way)' if number == 2 else ''} ...", end="", flush=True)
+            pos, peak = move(hand, motor, start, start + direction * amplitude, speed)
+            reached[number] = math.degrees(pos - start)
+            time.sleep(0.6)  # hold, so the end position is easy to see
+            back, _ = move(hand, motor, pos, start, speed)
+            blocked = abs(reached[number]) < BLOCKED_FRACTION * math.degrees(amplitude)
+            print(f" {DIM}motor {reached[number]:+.0f} deg, {peak:.0f} mA{RESET}"
+                  + (f"  {BOLD}blocked{RESET}" if blocked else ""))
+            time.sleep(0.8)
+    finally:
+        hand.disable_torque([motor])
+    return reached
+
+
+def intro(args, current, count):
+    print(f"""
+{BOLD}Motor check, {args.hand} hand{RESET}: {count} motors, one at a time.
+
+For each motor:
+  1. The script names the joint to watch. Look at it.
+  2. The motor moves twice: {BOLD}MOVE 1{RESET} and back, then {BOLD}MOVE 2{RESET} (the opposite way) and back.
+  3. It asks about one of the two moves, normally MOVE 1, and says which one.
+  4. Answer with one key (no Enter): {BOLD}1{RESET} or {BOLD}2{RESET} for the direction it shows you,
+     {BOLD}n{RESET} nothing moved / not sure, {BOLD}w{RESET} a different joint moved, {BOLD}r{RESET} show both moves again,
+     {BOLD}s{RESET} skip, {BOLD}q{RESET} quit.
+
+Only the motor being checked has torque ({current} mA, {args.amplitude:g} deg of motor shaft each way); the rest of
+the hand is limp. If you are unsure, press r rather than guessing. Ctrl+C stops at any time.
+""")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     hands.add_hand_argument(p, default="baby")
     p.add_argument("--motors", type=int, nargs="+", help="Only these motor IDs (default: all but the wrist).")
-    p.add_argument("--wrist", action="store_true", help="Also move the wrist motor.")
-    p.add_argument("--amplitude", type=float, default=45.0, help="Motor-shaft move in degrees (default 45; max 120).")
+    p.add_argument("--wrist", action="store_true", help="Also check the wrist motor.")
+    p.add_argument("--amplitude", type=float, default=45.0,
+                   help="Motor-shaft move each way in degrees (default 45; max 120).")
     p.add_argument("--speed", type=float, default=40.0, help="Motor-shaft speed in deg/s (default 40; max 90).")
-    p.add_argument("--current", type=int, default=600,
-                   help="Goal-current limit of the moving motor in mA (default 600; clamped to the hand's "
-                        "safety_max_current_ma).")
+    p.add_argument("--current", type=int, default=700,
+                   help="Current limit of the moving motor in mA (default 700, what moved the tightened baby hand; "
+                        "limited to the hand's safety_max_current_ma).")
     args = p.parse_args()
     if not 0 < args.amplitude <= 120:
         p.error("--amplitude: from 0 to 120 deg")
     if not 0 < args.speed <= 90:
         p.error("--speed: from 0 to 90 deg/s")
+    if args.current <= 0:
+        p.error("--current: a current in mA above 0")
 
     config_path = hands.config_path(args.hand)
-    config_yaml = yaml.safe_load(config_path.read_text())
-    current = hands.clamp_current(args.current, config_yaml, "--current")
+    current = hands.clamp_current(args.current, yaml.safe_load(config_path.read_text()), "--current")
     hand = load_hand(config_path=str(config_path))
     motor_to_joint = hand.config.motor_to_joint_dict
     wrist_motor = abs(hand.config.joint_to_motor_map["wrist"])
@@ -196,67 +227,69 @@ def main():
         hand.set_control_mode("current_based_position")
         hand.disable_torque()
         hand.set_max_current(current)
-        print(f"\n{BOLD}Hand {args.hand}{RESET}: {len(motors)} motors, {args.amplitude:g} deg of motor shaft at "
-              f"{args.speed:g} deg/s, {current} mA. Answer with one key (no Enter); Ctrl+C stops.\n")
+        intro(args, current, len(motors))
+        print(f"Press {BOLD}Enter{RESET} to start.")
+        getkey(["\n", "\r", " "])
 
         i = 0
         while i < len(motors):
             motor = motors[i]
             joint = motor_to_joint[motor]
-            kind = kind_of(joint)
+            answer1, answer2, plus_dir = answers_for(joint)
             code, top, bottom = tendons.get(motor, ("", "", ""))
             config_sign = -1 if hand.config.joint_inversion_dict.get(joint) else 1
-            print(f"{BG['info']} {i + 1}/{len(motors)}  motor {motor} {RESET}  Watch: "
-                  f"{BOLD}{joint_label(joint)}{RESET}  {DIM}({joint}{', ' + code + ': top ' + top + ', bottom ' + bottom if code else ''}){RESET}")
-            time.sleep(1.0)  # time to look at the joint before it moves
-            start, direction, reached, peak = swing_out(hand, motor, amplitude, args.speed)
-            print(f"   {DIM}(motor {reached:+.0f} deg, peak {peak:.0f} mA; it holds here until you answer){RESET}")
-            print(f"   {BOLD}The move you just saw:{RESET} which way did it go?")
-            options = QUESTIONS[kind] + OTHER
-            for key, text, _ in options:
-                print(f"     {BOLD}{key}{RESET}  {text}")
-            key = getkey([k for k, _, _ in options])
-            hand_pos = float(hand.get_motor_pos(as_dict=True)[motor])
-            move(hand, motor, hand_pos, start, args.speed)
-            hand.disable_torque([motor])
+            print(f"\n{BG['info']} {i + 1}/{len(motors)}  motor {motor} {RESET}  Watch {BOLD}{joint_label(joint)}{RESET}"
+                  f"  {DIM}({joint}" + (f"; tendons {code}: top {top}, bottom {bottom}" if code else "") + f"){RESET}")
+            time.sleep(1.0)  # time to look at the joint
+            reached = show_moves(hand, motor, amplitude, args.speed)
+
+            # ask about MOVE 1 unless it was blocked and MOVE 2 was not; warn when both were small
+            limit = BLOCKED_FRACTION * args.amplitude
+            asked = 2 if abs(reached[1]) < limit <= abs(reached[2]) else 1
+            if asked == 2:
+                print(f"   MOVE 1 was blocked, so describe {BOLD}MOVE 2{RESET}.")
+            elif abs(reached[2]) < limit and abs(reached[1]) < limit:
+                print(f"   {BOLD}Both moves were small{RESET} (the joint may sit near an end, or the tendons are tight): "
+                      "answer only if you saw it clearly, otherwise r (again) or n.")
+            print(f"   In {BOLD}MOVE {asked}{RESET}, {joint_label(joint)} went:")
+            print(f"     {BOLD}1{RESET}  {answer1}\n     {BOLD}2{RESET}  {answer2}")
+            print("     " + "   ".join(f"{BOLD}{k}{RESET} {t}" for k, t in OTHER))
+            key = getkey(["1", "2"] + [k for k, _ in OTHER])
             if key == "q":
                 break
             if key == "r":
                 continue
             if key == "s":
-                print("   skipped\n")
+                print("   skipped")
                 i += 1
                 continue
 
-            moved, answer, joint_dir = joint, dict((k, t) for k, t, _ in options)[key], None
+            moved, answer, joint_dir = joint, None, None
             if key == "n":
                 moved = "nothing"
             elif key == "w":
-                print("   Which joint moved? Type it (e.g. 'ring knuckle', 'middle sideways') and Enter:")
+                print("   Which joint moved? Type it (e.g. 'ring knuckle', 'middle sideways') and press Enter:")
                 moved = input("   > ").strip() or "unknown"
-                print(f"   and which way? {', '.join(f'{k} = {t}' for k, t, _ in QUESTIONS['bend'] + QUESTIONS['side'])}")
-                answer = dict((k, t) for k, t, _ in QUESTIONS["bend"] + QUESTIONS["side"]).get(
-                    getkey(["c", "o", "p", "t"]))
             else:
-                joint_dir = dict((k, d) for k, _, d in options)[key]
-
-            # positive motor rotation -> joint direction: the sign joint_to_motor_map needs
-            needed = None if joint_dir is None else joint_dir * direction
+                answer = answer1 if key == "1" else answer2
+                joint_dir = None if plus_dir is None else (plus_dir if key == "1" else -plus_dir)
+            motor_dir = 1 if asked == 1 else -1  # MOVE 1 turned the motor +, MOVE 2 -
+            needed = None if joint_dir is None else joint_dir * motor_dir  # the sign joint_to_motor_map needs
             results["motors"][motor] = {
                 "expected_joint": joint, "tendons": code or None, "moved": moved, "answer": answer,
-                "motor_direction_tested": "+" if direction > 0 else "-", "motor_moved_deg": round(reached, 1),
-                "peak_current_ma": round(peak), "config_sign": config_sign, "sign_needed": needed}
+                "move_described": asked, "motor_moved_deg": {f"move_{n}": round(d, 1) for n, d in reached.items()},
+                "config_sign": config_sign, "sign_needed": needed}
             if moved == "nothing":
-                print(f"   {BG['bad']} NOTHING MOVED {RESET} motor {motor} (slack or detached tendon? try --current 700)\n")
+                print(f"   {BG['bad']} NOTHING MOVED {RESET} slack or detached tendon? Try again with a higher --current.")
             elif moved != joint:
-                print(f"   {BG['bad']} WRONG JOINT {RESET} motor {motor}: {moved}, not {joint}\n")
+                print(f"   {BG['bad']} WRONG JOINT {RESET} motor {motor} moved {moved}, not {joint}")
             elif needed is None:
-                print(f"   {BG['ok']} joint ok {RESET} (noted: {answer})\n")
+                print(f"   {BG['ok']} right joint {RESET} (direction noted: {answer})")
             elif needed == config_sign:
-                print(f"   {BG['ok']} joint and direction ok {RESET}\n")
+                print(f"   {BG['ok']} right joint, right direction {RESET}")
             else:
-                print(f"   {BG['bad']} INVERTED {RESET} joint ok, but the map needs {joint}: "
-                      f"{'-' if needed < 0 else ''}{motor}\n")
+                print(f"   {BG['bad']} INVERTED {RESET} right joint, but config.yaml needs {joint}: "
+                      f"{'-' if needed < 0 else ''}{motor}")
             out_file.write_text(yaml.safe_dump(results, sort_keys=False))
             i += 1
     except KeyboardInterrupt:
@@ -274,9 +307,9 @@ def main():
                 if r["moved"] == "nothing":
                     status = "NOTHING MOVED"
                 elif r["moved"] != r["expected_joint"]:
-                    status = f"WRONG: {r['moved']}"
+                    status = f"WRONG JOINT: {r['moved']}"
                 elif r["sign_needed"] is None:
-                    status = f"ok ({r['answer']})"
+                    status = f"right joint ({r['answer']})"
                 elif r["sign_needed"] == r["config_sign"]:
                     status = "ok"
                 else:
@@ -284,7 +317,7 @@ def main():
                     fixes.append(f"  {r['expected_joint']}: {'-' if r['sign_needed'] < 0 else ''}{motor}")
                 print(f"  motor {motor:2d}  {r['expected_joint']:<11} {status}")
             if fixes:
-                print("Sign fixes for joint_to_motor_map:\n" + "\n".join(fixes))
+                print("Sign fixes for joint_to_motor_map in config.yaml:\n" + "\n".join(fixes))
 
 
 if __name__ == "__main__":
