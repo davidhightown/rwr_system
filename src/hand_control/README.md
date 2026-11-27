@@ -15,7 +15,9 @@ pip install --no-deps orca_core==0.5.2
 ```bash
 cd orca
 python tensioning_v2.py
+python tensioning_v2.py --hand baby   # the baby hand
 ```
+The motors wind with the config's `calibration_current` and hold with its `max_current`; `--wind-current` and `--hold-current` override them for one run.
 
 **2. Run the hand:** Pick ONE of the following, they cannot run together:
 

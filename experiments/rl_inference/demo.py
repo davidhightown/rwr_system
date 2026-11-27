@@ -61,7 +61,12 @@ from cube_eval.thermal import TemperatureFilter, ThermalModel  # noqa: E402
 from cube_eval.turns import TurnCounter  # noqa: E402
 
 DEFAULT_CONFIG = REPO / "experiments/cfgs/demo.yaml"
-HAND_CONFIG = REPO / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml"
+sys.path.insert(0, str(REPO / "src/hand_control/orca"))
+import hands  # noqa: E402
+
+# The hand (--hand): its config.yaml in the source tree and the hand controller's hand_cfg_name
+HAND_CONFIG = hands.config_path(hands.DEFAULT_HAND)
+HAND_CFG_NAME = hands.cfg_name(hands.DEFAULT_HAND)
 HAND_NODE = REPO / "src/hand_control/hand_control_node.py"
 MOCK_HAND_NODE = HERE / "cube_eval/mock_hand_node.py"
 MODE_LABELS = dict(proprio="PROPRIOCEPTIVE", extero="EXTEROCEPTIVE (camera)", axes="OPTIONAL - ALL AXES",
@@ -907,7 +912,7 @@ class Demo:
             params = log_dir / "hand_params.yaml"
             params.write_text(yaml.safe_dump({"/**": {"ros__parameters": {
                 "hand_controller/hand_name": "orca_v2", "hand_controller/hand_chirality": "right",
-                "hand_controller/hand_cfg_name": "orcahand_v2", "hand_controller/calibrate": False,
+                "hand_controller/hand_cfg_name": HAND_CFG_NAME, "hand_controller/calibrate": False,
                 "hand_controller/compliant_test_mode": False, "hand_controller/torque_off_on_exit": True,
                 "hand_controller/servo_acceleration_raw": -1 if a.servo_acc is None else int(a.servo_acc),
                 "hand_controller/max_current_ma": -1 if a.max_current is None else int(a.max_current)}}}))
@@ -1438,6 +1443,7 @@ def warm_up(policy):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    hands.add_hand_argument(p)
     p.add_argument("--mode", required=True, choices=("proprio", "extero", "optional"))
     p.add_argument("--task", choices=("axes", "goals"), help="With --mode optional: instead of optional.task.")
     p.add_argument("--config", type=Path, default=DEFAULT_CONFIG, help="The demo's YAML (default: %(default)s).")
@@ -1447,6 +1453,8 @@ def main(argv=None):
     p.add_argument("--progress-every", type=float, default=PROGRESS_EVERY_S, metavar="S", help="A progress line in "
                    "the terminal every S seconds of a run (default %(default)g; 0: none).")
     cli = p.parse_args(argv)
+    global HAND_CONFIG, HAND_CFG_NAME
+    HAND_CONFIG, HAND_CFG_NAME = hands.config_path(cli.hand), hands.cfg_name(cli.hand)
     plan = load_plan(cli.config, cli.mode, cli.task)
     a = settings(plan, cli)
     label = MODE_LABELS[a.kind] + (" + camera" if a.kind == "proprio" and a.camera else "")

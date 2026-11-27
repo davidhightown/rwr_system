@@ -113,7 +113,12 @@ from cube_eval.metrics import joint_tracking, progress_metrics, status_names, tr
 from cube_eval.thermal import TemperatureFilter, ThermalModel  # noqa: E402
 from cube_eval.turns import DropMonitor, RestDetector, TurnCounter, lateral_offset  # noqa: E402
 
-HAND_CONFIG = REPO / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml"
+sys.path.insert(0, str(REPO / "src/hand_control/orca"))
+import hands  # noqa: E402
+
+# The hand (--hand): its config.yaml in the source tree and the hand controller's hand_cfg_name
+HAND_CONFIG = hands.config_path(hands.DEFAULT_HAND)
+HAND_CFG_NAME = hands.cfg_name(hands.DEFAULT_HAND)
 HAND_NODE = REPO / "src/hand_control/hand_control_node.py"
 MOCK_HAND_NODE = HERE / "cube_eval/mock_hand_node.py"
 WANDB_RESULTS = HERE / "cube_eval/wandb_results.py"
@@ -428,7 +433,7 @@ class Evaluation:
                 params = log_dir / "hand_params.yaml"
                 params.write_text(yaml.safe_dump({"/**": {"ros__parameters": {
                     "hand_controller/hand_name": "orca_v2", "hand_controller/hand_chirality": "right",
-                    "hand_controller/hand_cfg_name": "orcahand_v2", "hand_controller/calibrate": False,
+                    "hand_controller/hand_cfg_name": HAND_CFG_NAME, "hand_controller/calibrate": False,
                     "hand_controller/compliant_test_mode": False, "hand_controller/torque_off_on_exit": True,
                     "hand_controller/servo_acceleration_raw": -1 if a.servo_acc is None else int(a.servo_acc)}}}))
                 cmd = [sys.executable, str(HAND_NODE), "--ros-args", "-r", "__ns:=/right", "--params-file", str(params)]
@@ -1159,6 +1164,7 @@ def append_row(path, row):
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    hands.add_hand_argument(p)
     p.add_argument("policies", nargs="*", type=Path, help="Exported policy files (.pt) or model names in --models-dir "
                    "(walrus = models_proprio/walrus_policy.pt), run in this order. The model name is the file name "
                    "without .pt and _policy. None: the untested models, as --auto.")
@@ -1438,6 +1444,8 @@ def untested_policies(args, known):
 
 def main(argv=None):
     args = parse_args(argv)
+    global HAND_CONFIG, HAND_CFG_NAME
+    HAND_CONFIG, HAND_CFG_NAME = hands.config_path(args.hand), hands.cfg_name(args.hand)
     if args.upload:
         try:
             wandb_results.upload_runs(args.upload, video=args.wandb_video, entity=args.wandb_entity,

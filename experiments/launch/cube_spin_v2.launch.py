@@ -97,6 +97,12 @@ def generate_launch_description():
                     'the real hand. Do not use together with a running hand controller.'
     )
 
+    hand_arg = DeclareLaunchArgument(
+        'hand',
+        default_value='v2',
+        description='Which ORCA hand: v2 (full size) or baby (scaled down; configs/orcahand_baby)'
+    )
+
     tag_size_arg = DeclareLaunchArgument(
         'tag_size',
         default_value='0.08',
@@ -122,6 +128,7 @@ def generate_launch_description():
         enable_hand_controller_arg,
         fake_joint_states_arg,
         tag_size_arg,
+        hand_arg,
         nodes,
     ])
 
@@ -132,6 +139,7 @@ def launch_setup(context, *args, **kwargs):
     
     # Get launch arguments
     calibration_file = LaunchConfiguration('calibration').perform(context)
+    hand_cfg_name = 'orcahand_' + LaunchConfiguration('hand').perform(context)
     policy_file = LaunchConfiguration('policy').perform(context)
     dry_run = LaunchConfiguration('dry_run').perform(context).lower() == 'true'
     model_path = LaunchConfiguration('model_path').perform(context)
@@ -301,7 +309,7 @@ def launch_setup(context, *args, **kwargs):
                 'dry_run': dry_run,
                 'hand_config_path': os.path.join(
                     get_package_share_directory('hand_control'),
-                    'orca', 'configs', 'orcahand_v2', 'right', 'config.yaml'
+                    'orca', 'configs', hand_cfg_name, 'right', 'config.yaml'
                 ),
             }],
         )
@@ -318,7 +326,7 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{
                 "hand_controller/hand_name": "orca_v2",
                 "hand_controller/hand_chirality": "right",
-                "hand_controller/hand_cfg_name": "orcahand_v2",
+                "hand_controller/hand_cfg_name": hand_cfg_name,
                 "hand_controller/calibrate": False
             }],
         )

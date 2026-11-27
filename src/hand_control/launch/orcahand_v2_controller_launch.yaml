@@ -9,6 +9,8 @@
 
 # example usage:
 # $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand_chirality:=right calibrate:=true launch_rviz:=true compliant_test_mode:=true
+# $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand:=baby calibrate:=true   # the baby hand
+# $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand:=baby calibrate:=true calibration_current_ma:=1000
 # this launch file does not launch any nodes related to:
 # - cameras
 # - controllers
@@ -25,9 +27,19 @@ launch:
       description: "Chirality of the hand to be controlled"
 
   - arg:
+      name: "hand"
+      default: "v2"
+      description: "Which ORCA hand: v2 (full size) or baby (scaled down; configs/orcahand_baby)"
+
+  - arg:
       name: "calibrate"
       default: "false"
       description: "Whether to calibrate the hand on startup"
+
+  - arg:
+      name: "calibration_current_ma"
+      default: "-1"
+      description: "Current (mA) every joint is calibrated with, instead of config.yaml's calibration_current (-1: the config's)"
 
   - arg:
       name: "compliant_test_mode"
@@ -79,11 +91,13 @@ launch:
         - name: "hand_controller/hand_chirality"
           value: "$(var hand_chirality)"
         - name: "hand_controller/hand_cfg_name"
-          value: "orcahand_v2"
+          value: "orcahand_$(var hand)"
         - name: "hand_controller/calibrate"
           value: "$(var calibrate)"
         - name: "hand_controller/compliant_test_mode"
           value: "$(var compliant_test_mode)"
+        - name: "hand_controller/calibration_current_ma"
+          value: "$(var calibration_current_ma)"
 
 
   # -------- Visualize target pose (commanded) --------

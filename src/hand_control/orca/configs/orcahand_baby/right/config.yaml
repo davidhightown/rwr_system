@@ -1,0 +1,241 @@
+# ORCA baby hand (task x): the ORCA v2 scaled down, with its own tendon routing.
+# Source: the team's "Tendon Mapping" table (Notion, 23 Nov 2026): tendons by the order they cross the wrist,
+# motors in ORCA order. Motor -> joint (AP = abduction, PP = proximal phalanx = mcp, DP = distal phalanx = pip):
+#   1 wrist   2 I-DP    3 I-PP    4 T-AP    5 T-DP    6 M-AP    7 R-AP    8 R-DP    9 R-PP
+#  10 P-PP   11 P-DP   12 P-AP   13 M-PP   14 M-DP   15 I-AP   16 T-PP   17 T-TP
+# UNVERIFIED (check with experiments/orca/motor_check.py --hand baby before the first calibration):
+#  - signs: checked with motor_check.py on 23 Nov for every joint except thumb_cmc and thumb_abd (their positive
+#    direction is not known yet). Bending joints: flex tendon on the top spool -> negative, on the bottom -> positive.
+#    Sideways joints: R tendon on the top spool -> negative (middle -6, pinky -12), L on top -> positive (index 15,
+#    ring 7); pinky_abd confirmed in the first calibration (its motor_check answer was the wrong way round).
+#  - T-AP -> thumb_abd and T-TP -> thumb_cmc (if reversed, swap motors 4 and 17)
+#  - joint_roms and neutral_position are still the full-size hand's: measure the baby hand's hardstops
+# motor_type and baudrate are auto-detected at connect; set them here to pin a driver
+port: auto
+# Below the full-size hand's 1200 mA for the small parts; 400 mA was too weak once the tendons were tightened
+# (motor_check.py needed 700 mA on 23 Nov), and orca_core needs it at least calibration_current. Also the holding
+# current of tensioning_v2.py (700 mA held well on 23 Nov).
+max_current: 900
+# Highest goal current any rwr_system script may set on this hand (demo/eval yaml overrides are clamped to it);
+# 1200 mA = the full-size hand's operating current; also caps calibration_current_ma:=... of the controller launch.
+safety_max_current_ma: 1200
+# Servo acceleration ramp (Feetech ACC register, 8.7 deg/s^2 of motor shaft per unit; 0 = no ramp, max 254).
+# Read by rwr_system, not orca_core: the chirp recorder and the hand controller write it after init_joints.
+# It sets how fast the joints can follow a command (about 24 rad/s^2 at a finger joint at 150), so the sim
+# (rwr_faive_lab ORCA_V2_SERVO_ACCEL) must be fit to chirps recorded with the same value.
+# 150 (gentle ramp) for the first tests of the baby hand; no sim is fit to it yet.
+servo_acceleration_raw: 150
+type: right
+control_mode: current_based_position
+motor_ids:
+- 1
+- 2
+- 3
+- 4
+- 5
+- 6
+- 7
+- 8
+- 9
+- 10
+- 11
+- 12
+- 13
+- 14
+- 15
+- 16
+- 17
+joint_ids:
+- wrist
+- thumb_cmc
+- thumb_abd
+- thumb_mcp
+- thumb_dip
+- index_abd
+- index_mcp
+- index_pip
+- middle_abd
+- middle_mcp
+- middle_pip
+- ring_abd
+- ring_mcp
+- ring_pip
+- pinky_abd
+- pinky_mcp
+- pinky_pip
+joint_to_motor_map:
+  # motor: tendon pair (Nr. top / bottom spool)
+  thumb_cmc: 17     # T-TP: flex 15 top / ext 14 bottom   (T-TP = cmc assumed)
+  thumb_abd: 4      # T-AP: L 17 top / R 20 bottom
+  thumb_mcp: -16    # T-PP: flex 16 top / ext 13 bottom
+  thumb_dip: -5     # T-DP: flex 18 top / ext 19 bottom
+  index_abd: 15     # I-AP: L 11 top / R 12 bottom
+  index_mcp: -3     # I-PP: flex 24 top / ext 21 bottom
+  index_pip: 2      # I-DP: ext 23 top / flex 22 bottom   (flex on the bottom spool)
+  middle_abd: -6    # M-AP: R 25 top / L 26 bottom
+  middle_mcp: -13   # M-PP: flex 7 top / ext 8 bottom
+  middle_pip: -14   # M-DP: flex 10 top / ext 9 bottom
+  ring_abd: 7       # R-AP: L 32 top / R 27 bottom
+  ring_mcp: -9      # R-PP: flex 30 top / ext 29 bottom
+  ring_pip: 8       # R-DP: ext 31 top / flex 28 bottom   (flex on the bottom spool)
+  pinky_abd: -12    # P-AP: R 6 top / L 1 bottom
+  pinky_mcp: 10     # P-PP: ext 4 top / flex 3 bottom     (flex on the bottom spool)
+  pinky_pip: -11    # P-DP: flex 5 top / ext 2 bottom
+  wrist: -1
+joint_roms:
+  wrist:
+  - -65
+  - 35
+  thumb_cmc:
+  - -45
+  - 33
+  thumb_abd:
+  - -18
+  - 55
+  thumb_mcp:
+  - -25
+  - 100
+  thumb_dip:
+  - -15
+  - 107
+  index_abd:
+  - -25
+  - 30
+  index_mcp:
+  - -25
+  - 100
+  index_pip:
+  - -15
+  - 107
+  middle_abd:
+  - -27
+  - 27
+  middle_mcp:
+  - -25
+  - 100
+  middle_pip:
+  - -15
+  - 107
+  ring_abd:
+  - -27
+  - 27
+  ring_mcp:
+  - -25
+  - 100
+  ring_pip:
+  - -15
+  - 107
+  pinky_abd:
+  - -30
+  - 30
+  pinky_mcp:
+  - -25
+  - 100
+  pinky_pip:
+  - -15
+  - 107
+neutral_position:
+  thumb_cmc: 0
+  thumb_abd: 50
+  thumb_mcp: 33
+  thumb_dip: 18
+  index_abd: -14
+  index_mcp: 2
+  index_pip: 6
+  middle_abd: -4
+  middle_mcp: 2
+  middle_pip: 4
+  ring_abd: 10
+  ring_mcp: -2
+  ring_pip: 8
+  pinky_abd: 22
+  pinky_mcp: -4
+  pinky_pip: -2
+  wrist: -20
+# Stalls every joint into its hardstops. 600 mA was too weak with the tightened tendons (first calibration,
+# 23 Nov): 800, and 900 for the retry of a joint that stopped short. Also tensioning_v2.py's winding current, as on the
+# full-size hand, so the tendons are wound taut under the load calibration drives the joints into their end stops with.
+calibration_current: 800
+calibration_retry_current: 900
+# Slower than the full-size hand's 0.15 rad / 0.0001 s (motors at nearly full speed, too fast for the small joints):
+# the goal goes 0.08 rad ahead of the motor every 50 ms, at most ~1.6 rad/s (90 deg/s) of motor shaft. If joints stop
+# short of their hardstops (short-travel warnings), raise the step size a little, e.g. 0.1.
+calibration_step_size: 0.08
+calibration_step_period: 0.05
+calibration_num_stable: 10
+calibration_threshold: 0.01
+# As the full-size hand's, except that the thumb base (thumb_cmc) is held open (flex, its positive end) while the
+# other thumb joints are calibrated, so the thumb does not hit the palm.
+calibration_sequence:
+- step: 1
+  joints:
+    thumb_cmc: flex
+- step: 2
+  joints:
+    thumb_cmc: extend
+- step: 3    # thumb base held open
+  joints:
+    thumb_abd: flex
+    thumb_cmc: flex
+- step: 4    # thumb base held open
+  joints:
+    thumb_abd: extend
+    thumb_cmc: flex
+- step: 5    # thumb base held open
+  joints:
+    thumb_mcp: flex
+    thumb_cmc: flex
+- step: 6    # thumb base held open
+  joints:
+    thumb_mcp: extend
+    thumb_cmc: flex
+- step: 7    # thumb base held open
+  joints:
+    thumb_dip: flex
+    thumb_cmc: flex
+- step: 8    # thumb base held open
+  joints:
+    thumb_dip: extend
+    thumb_cmc: flex
+- step: 9
+  joints:
+    index_abd: flex
+    middle_abd: flex
+    ring_abd: flex
+    pinky_abd: flex
+- step: 10
+  joints:
+    index_abd: extend
+    middle_abd: extend
+    ring_abd: extend
+    pinky_abd: extend
+- step: 11
+  joints:
+    index_mcp: flex
+    middle_mcp: flex
+    ring_mcp: flex
+    pinky_mcp: flex
+- step: 12
+  joints:
+    index_mcp: extend
+    middle_mcp: extend
+    ring_mcp: extend
+    pinky_mcp: extend
+- step: 13
+  joints:
+    index_pip: flex
+    middle_pip: flex
+    ring_pip: flex
+    pinky_pip: flex
+- step: 14
+  joints:
+    index_pip: extend
+    middle_pip: extend
+    ring_pip: extend
+    pinky_pip: extend
+- step: 15
+  joints:
+    wrist: flex
+- step: 16
+  joints:
+    wrist: extend

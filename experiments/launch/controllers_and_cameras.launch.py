@@ -7,8 +7,8 @@ from ament_index_python.packages import get_package_share_directory
 # policy with run_policy_inference.launch.py. Select the cameras in generate_launch_description().
 
 
-def spawn_hand_controller(hand_chirality):
-    """Spawn the ORCA v2 hand controller node for one side (left/right)."""
+def spawn_hand_controller(hand_chirality, hand_cfg_name="orcahand_v2"):
+    """Spawn the ORCA v2 hand controller node for one side (left/right); hand_cfg_name: orcahand_v2 or orcahand_baby."""
     hand_controller_node = Node(
         package="hand_control",
         executable="hand_control_node.py",
@@ -19,7 +19,7 @@ def spawn_hand_controller(hand_chirality):
             {
                 "hand_controller/hand_name": "orca_v2",
                 "hand_controller/hand_chirality": hand_chirality,
-                "hand_controller/hand_cfg_name": "orcahand_v2",
+                "hand_controller/hand_cfg_name": hand_cfg_name,
                 "hand_controller/calibrate": False,
             }
         ],
@@ -31,6 +31,7 @@ def generate_launch_description():
     OAKD_CAMERA_CFG_NAME = "oakd_scissors_task" # file in cfgs/cams, or None
     ZED_CAMERA_CFG_NAME = None # "zed_color_arena" # or None
     # the ORCA v2 hand is right-handed only (src/hand_control/orca/configs/orcahand_v2/right)
+    HAND_CFG_NAME = "orcahand_v2"  # or "orcahand_baby" for the baby hand
     LEFT_SIDE = False
     RIGHT_SIDE = True
 
@@ -62,6 +63,6 @@ def generate_launch_description():
 
     return LaunchDescription(
         camera_nodes
-        + (spawn_hand_controller("right") if RIGHT_SIDE else [])
-        + (spawn_hand_controller("left") if LEFT_SIDE else [])
+        + (spawn_hand_controller("right", HAND_CFG_NAME) if RIGHT_SIDE else [])
+        + (spawn_hand_controller("left", HAND_CFG_NAME) if LEFT_SIDE else [])
     )

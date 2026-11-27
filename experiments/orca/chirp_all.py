@@ -222,7 +222,7 @@ def finish_run(run_dir, args, calibration):
 
 def main(argv=None, *, factory=None, clock=time.monotonic, sleep=time.sleep):
     parser = make_parser()
-    args = parser.parse_args(argv)
+    args = chirp.use_hand_config(parser.parse_args(argv), INSTALLED_CONFIG)
     args.joints = args.joints or default_joints(args.finger)
     source_config = args.config
     source_calibration = source_config.parent / "calibration.yaml"

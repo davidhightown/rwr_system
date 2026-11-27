@@ -1,8 +1,11 @@
 """ORCA v2 hand controller. Drives the hand through the orca_core package,
 exposing the interface hand_control_node.py expects."""
+import dataclasses
+
 import numpy as np
 import yaml
-from orca_core import load_hand
+from orca_core import OrcaJointPositions, load_hand
+from orca_core.hardware_hand import NUM_STEPS
 
 from faive_system.src.hand_control.orca import servo_profile
 
@@ -11,7 +14,7 @@ FEETECH_PRESENT_VOLTAGE = 62  # 0.1 V per unit; register 63 is the temperature i
 
 
 class OrcaHandV2:
-    def __init__(self, config_path: str, acceleration_raw=None, max_current_ma=None):
+    def __init__(self, config_path: str, acceleration_raw=None, max_current_ma=None, calibration_current_ma=None):
         # An explicit config_path skips orca_core's hardware autodetection.
         # calibration.yaml is read from and saved next to config_path.
         # acceleration_raw: the servo ramp to write instead of the config's servo_acceleration_raw (None: the config's)
@@ -25,7 +28,22 @@ class OrcaHandV2:
         servo_profile.acceleration_raw(self._config_yaml)  # reject a bad value before the hand moves
         if max_current_ma is not None and (isinstance(max_current_ma, bool) or not 0 < float(max_current_ma) <= 5000):
             raise ValueError(f"max_current_ma must be a number of mA from 1 to 5000, got {max_current_ma!r}")
+        # A hand with safety_max_current_ma in its config.yaml (the baby hand) never gets more than that
+        ceiling = self._config_yaml.get("safety_max_current_ma")
+        if max_current_ma is not None and ceiling is not None and int(max_current_ma) > int(ceiling):
+            print(f"max_current_ma {int(max_current_ma)} is above this hand's safety_max_current_ma: using {int(ceiling)}")
+            max_current_ma = int(ceiling)
         self.max_current_ma = None if max_current_ma is None else int(max_current_ma)
+        # calibration_current_ma: the current every joint is driven onto its hardstops with in this run's calibration,
+        # instead of the config's calibration_current (None: the config's); limited like max_current_ma
+        if calibration_current_ma is not None:
+            if isinstance(calibration_current_ma, bool) or not 0 < float(calibration_current_ma) <= 5000:
+                raise ValueError(f"calibration_current_ma must be a number of mA from 1 to 5000, got {calibration_current_ma!r}")
+            if ceiling is not None and int(calibration_current_ma) > int(ceiling):
+                print(f"calibration_current_ma {int(calibration_current_ma)} is above this hand's safety_max_current_ma: "
+                      f"using {int(ceiling)}")
+                calibration_current_ma = int(ceiling)
+        self.calibration_current_ma = None if calibration_current_ma is None else int(calibration_current_ma)
         config = self._hand.config
         self.joint_ids = list(config.joint_ids)
         self.num_motors = len(self.joint_ids)
@@ -44,8 +62,31 @@ class OrcaHandV2:
         ok, message = self._hand.connect(interactive=False)
         if not ok:
             raise RuntimeError(f"Could not connect to the ORCA hand: {message}")
-        # Calibrates automatically when no calibration exists; moves to the config's neutral pose.
-        self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
+        if self.calibration_current_ma is None:
+            # Calibrates automatically when no calibration exists; moves to the config's neutral pose.
+            self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
+        else:
+            # This run's calibration current on every joint (the wrist too, unless config.yaml sets its own).
+            # orca_core needs max_current >= calibration_current and a retry current above it (the retry only runs
+            # for joints with a joint_motor_travel baseline): both raised for the calibration, then the config's
+            # values are back before the hand moves to neutral.
+            config = self._hand.config
+            current = self.calibration_current_ma
+            retry = config.calibration_retry_current
+            self._hand.config = dataclasses.replace(
+                config, calibration_current=current, max_current=max(int(config.max_current), current),
+                calibration_retry_current=None if retry is None else max(int(retry), current + 100),
+                **({} if self._config_yaml.get("wrist_calibration_current") is not None
+                   else dict(wrist_calibration_current=current)))
+            try:
+                self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=False)
+            finally:
+                self._hand.config = config
+            self._hand.set_max_current(config.max_current)
+            if initialize:  # as orca_core's init_joints(move_to_neutral=True)
+                self._hand.set_joint_positions(OrcaJointPositions.from_dict(config.neutral_position),
+                                               num_steps=NUM_STEPS)
+                self._hand._settle_neutral_move()
         # The same servo acceleration ramp as the chirp recordings the sim was fit to (init_joints writes orca_core's own).
         self.servo_profile = servo_profile.apply(self._hand, self._config_yaml)
         if self.max_current_ma is not None:  # clamped by orca_core to each motor's hardware ceiling

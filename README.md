@@ -117,6 +117,7 @@ Make sure that the servo wiring is correct before you connect the power: the ser
 1. **Tension the tendons.** The motors wind the tendons taut and then hold them under current. With the 3D-printed ratchet, turn the top spool of each servo clockwise until the tendon feels firm, and no further: too much tension makes joints stall before their end stops in calibration. Press Ctrl+C when done:
    ```bash
        python src/hand_control/orca/tensioning_v2.py
+       python src/hand_control/orca/tensioning_v2.py --hand baby   # the baby hand
    ```
    ```
    `Motor ID N has not been fully calibrated` for all motors is normal here: this script reads the source config folder, and the calibration is in `install/`. Tensioning does not use it.

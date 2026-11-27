@@ -44,7 +44,12 @@ from cube_eval.detector import DEFAULT_CKPT, CubePoseEstimator  # noqa: E402
 from cube_eval.hud import CUBE_EDGES, GREEN, WHITE, YELLOW, project, text  # noqa: E402
 from cube_spin_policy import GOAL_POS, MOUNT_IN_HAND, OBS_T_HAND, hand_T_camera  # noqa: E402
 
-HAND_CONFIG = REPO / "src/hand_control/orca/configs/orcahand_v2/right/config.yaml"
+sys.path.insert(0, str(REPO / "src/hand_control/orca"))
+import hands  # noqa: E402
+
+# The hand (--hand): its config.yaml in the source tree and the hand controller's hand_cfg_name
+HAND_CONFIG = hands.config_path(hands.DEFAULT_HAND)
+HAND_CFG_NAME = hands.cfg_name(hands.DEFAULT_HAND)
 HAND_NODE = REPO / "src/hand_control/hand_control_node.py"
 LOG_DIR = REPO / "logs/tune_hand_to_tag"
 DEFAULT_CALIBRATION = REPO / "experiments/cfgs/calibration/camera_extrinsics_2026-11-13.npy"
@@ -155,7 +160,7 @@ class Hand:
         params = LOG_DIR / "hand_params.yaml"
         params.write_text(yaml.safe_dump({"/**": {"ros__parameters": {
             "hand_controller/hand_name": "orca_v2", "hand_controller/hand_chirality": "right",
-            "hand_controller/hand_cfg_name": "orcahand_v2", "hand_controller/calibrate": False,
+            "hand_controller/hand_cfg_name": HAND_CFG_NAME, "hand_controller/calibrate": False,
             "hand_controller/compliant_test_mode": False, "hand_controller/torque_off_on_exit": True}}}))
         log = open(LOG_DIR / "hand_controller.log", "a")
         cmd = [sys.executable, str(HAND_NODE), "--ros-args", "-r", "__ns:=/right", "--params-file", str(params)]
@@ -272,6 +277,7 @@ def draw(image, K, dist, cam_T_hand, cube, cube_age, values):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    hands.add_hand_argument(p)
     p.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION, help="cam_T_tag of apriltag_calibration.py.")
     p.add_argument("--start", type=float, nargs=6, metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"),
                    help="Start values (m, deg). Default: hand_to_tag of the .yaml next to the calibration.")
@@ -285,6 +291,8 @@ def main():
     p.add_argument("--no-hand", action="store_true", help="Do not start the hand controller.")
     p.add_argument("--start-wrist-deg", type=float, help="Wrist angle of the start pose; default: as eval_policies.py.")
     args = p.parse_args()
+    global HAND_CONFIG, HAND_CFG_NAME
+    HAND_CONFIG, HAND_CFG_NAME = hands.config_path(args.hand), hands.cfg_name(args.hand)
     args.calibration = args.calibration.expanduser()
     cam_T_tag = np.load(args.calibration)
     yaml_path = args.calibration.with_suffix(".yaml")

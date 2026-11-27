@@ -46,6 +46,9 @@ class HandControllerNode(Node):
             # every motor's goal-current limit (mA) instead of config.yaml's max_current; -1: the config's
             self.declare_parameter('hand_controller/max_current_ma', -1)
             max_current_ma = self.get_parameter('hand_controller/max_current_ma').value
+            # the current every joint is calibrated with (mA) instead of config.yaml's calibration_current; -1: the config's
+            self.declare_parameter('hand_controller/calibration_current_ma', -1)
+            calibration_current_ma = self.get_parameter('hand_controller/calibration_current_ma').value
 
             config_dir_path = os.path.join(
                 get_package_share_directory("hand_control"),
@@ -70,7 +73,9 @@ class HandControllerNode(Node):
             # max_current_ma only when set: the default also runs with an older hand_controller_v2.py
             self._hc = OrcaHandV2(os.path.join(config_dir_path, self.chirality, "config.yaml"),
                                   acceleration_raw=None if acceleration_raw < 0 else int(acceleration_raw),
-                                  **({} if max_current_ma < 0 else dict(max_current_ma=int(max_current_ma))))
+                                  **({} if max_current_ma < 0 else dict(max_current_ma=int(max_current_ma))),
+                                  **({} if calibration_current_ma < 0 else
+                                     dict(calibration_current_ma=int(calibration_current_ma))))
             self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode)
             self.get_logger().info(
                 f"Servo acceleration {self._hc.servo_profile['servo_acceleration_raw']} (raw) on every motor; "

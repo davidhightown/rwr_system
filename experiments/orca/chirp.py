@@ -27,6 +27,7 @@ import yaml
 # Shared with the deployment controller; plain Python, so it loads without installing faive_system.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/hand_control/orca"))
 import servo_profile  # noqa: E402
+import hands  # noqa: E402
 
 
 DEFAULT_CONFIG = (
@@ -83,10 +84,19 @@ def check_abduction_convention(config):
                          "finger_layout's direction assumption does not hold. Use --abd-gap-deg 0.")
 
 
+def use_hand_config(args, default):
+    """--hand without --config: the default config path with orcahand_v2 replaced by that hand's folder."""
+    if args.hand and args.config == default:
+        args.config = Path(str(default).replace(hands.cfg_name("v2"), hands.cfg_name(args.hand)))
+    return args
+
+
 def make_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help="This hand's config.yaml; calibration.yaml must be beside it.")
+    parser.add_argument("--hand", choices=sorted(hands.HANDS), help="Which ORCA hand: v2 or baby. Picks that "
+                        "hand's config.yaml in place of the default orcahand_v2 one (ignored with --config).")
     parser.add_argument("--joints", nargs="+", default=["index_mcp"],
                         help="Joint names to sweep sequentially (ORCA v2 uses thumb_cmc).")
     parser.add_argument("--ctrl-freq", type=float, default=20.0)
@@ -427,7 +437,7 @@ def run_hardware(args, plan, *, factory=None, clock=time.monotonic, sleep=time.s
 
 def main(argv=None):
     parser = make_parser()
-    args = parser.parse_args(argv)
+    args = use_hand_config(parser.parse_args(argv), DEFAULT_CONFIG)
     try:
         with args.config.open() as stream:
             config = yaml.safe_load(stream)
