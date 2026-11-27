@@ -19,6 +19,7 @@ Stop the hand controller node first: both need the hand's serial port.
     python motor_check.py --hand baby --wrist         # the wrist too (the whole hand swings)
 """
 import argparse
+import csv
 import math
 import sys
 import time
@@ -32,26 +33,6 @@ from orca_core import load_hand
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import hands  # noqa: E402
 
-# Baby hand tendons per motor, from the team's Tendon Mapping table: (code, top spool, bottom spool)
-BABY_TENDONS = {
-    1: ("wrist", "-", "-"),
-    2: ("I-DP", "23 I-DP-ext", "22 I-DP-flex"),
-    3: ("I-PP", "24 I-PP-flex", "21 I-PP-ext"),
-    4: ("T-AP", "17 T-AP-L", "20 T-AP-R"),
-    5: ("T-DP", "18 T-DP-flex", "19 T-DP-ext"),
-    6: ("M-AP", "25 M-AP-R", "26 M-AP-L"),
-    7: ("R-AP", "32 R-AP-L", "27 R-AP-R"),
-    8: ("R-DP", "31 R-DP-ext", "28 R-DP-flex"),
-    9: ("R-PP", "30 R-PP-flex", "29 R-PP-ext"),
-    10: ("P-PP", "4 P-PP-ext", "3 P-PP-flex"),
-    11: ("P-DP", "5 P-DP-flex", "2 P-DP-ext"),
-    12: ("P-AP", "6 P-AP-R", "1 P-AP-L"),
-    13: ("M-PP", "7 M-PP-flex", "8 M-PP-ext"),
-    14: ("M-DP", "10 M-DP-flex", "9 M-DP-ext"),
-    15: ("I-AP", "11 I-AP-L", "12 I-AP-R"),
-    16: ("T-PP", "16 T-PP-flex", "13 T-PP-ext"),
-    17: ("T-TP", "15 T-TP-flex", "14 T-TP-ext"),
-}
 
 FINGER_NAMES = {"thumb": "thumb", "index": "index finger", "middle": "middle finger", "ring": "ring finger",
                 "pinky": "pinky"}
@@ -72,6 +53,17 @@ OTHER = [("n", "nothing moved / not sure"), ("w", "a DIFFERENT joint moved"), ("
 BLOCKED_FRACTION = 0.4  # a move that gets less than this share of --amplitude counts as blocked
 BG = {"ok": "\033[42;30m", "bad": "\033[41;97m", "info": "\033[44;97m"}
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
+
+
+def load_tendons(hand_name):
+    """Motor -> (code, top-spool tendon, bottom-spool tendon) from the hand's tendon_mapping.csv, if it has one."""
+    path = hands.CONFIGS_DIR / hands.cfg_name(hand_name) / "tendon_mapping" / "tendon_mapping.csv"
+    if not path.exists():
+        return {}
+    spools = {}
+    for row in csv.DictReader(path.open()):
+        spools.setdefault(int(row["motor_id"]), {})[row["spool"]] = f"{row['nr']} {row['function']}"
+    return {motor: (s["top"].split()[1].rsplit("-", 1)[0], s["top"], s["bottom"]) for motor, s in spools.items()}
 
 
 def answers_for(joint):
@@ -206,7 +198,7 @@ def main():
     unknown = [m for m in motors if m not in motor_to_joint]
     if unknown:
         p.error(f"motors not in {config_path}: {unknown}")
-    tendons = BABY_TENDONS if args.hand == "baby" else {}
+    tendons = load_tendons(args.hand)
 
     ok, message = hand.connect(interactive=False)
     print(message)
