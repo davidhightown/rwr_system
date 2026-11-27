@@ -76,7 +76,11 @@ class HandControllerNode(Node):
                                   **({} if max_current_ma < 0 else dict(max_current_ma=int(max_current_ma))),
                                   **({} if calibration_current_ma < 0 else
                                      dict(calibration_current_ma=int(calibration_current_ma))))
-            self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode)
+            # calibrate_wrist: with calibrate, also recalibrate an already calibrated wrist (orca_core skips it otherwise)
+            self.declare_parameter('hand_controller/calibrate_wrist', False)
+            calibrate_wrist = self.get_parameter('hand_controller/calibrate_wrist').value
+            self._hc.init_joints(calibrate=self.calibrate, initialize=True, compliant_test_mode=self.compliant_test_mode,
+                                 **({"calibrate_wrist": True} if calibrate_wrist else {}))
             self.get_logger().info(
                 f"Servo acceleration {self._hc.servo_profile['servo_acceleration_raw']} (raw) on every motor; "
                 "the sim's ORCA_V2_SERVO_ACCEL must come from chirps recorded with the same value")

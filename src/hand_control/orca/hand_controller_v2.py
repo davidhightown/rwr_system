@@ -4,8 +4,7 @@ import dataclasses
 
 import numpy as np
 import yaml
-from orca_core import OrcaJointPositions, load_hand
-from orca_core.hardware_hand import NUM_STEPS
+from orca_core import load_hand
 
 from faive_system.src.hand_control.orca import servo_profile
 
@@ -58,35 +57,33 @@ class OrcaHandV2:
             if config.joint_inversion_dict.get(joint, False):
                 self._joint_signs[joint_index[joint]] = -1.0
 
-    def init_joints(self, calibrate: bool = False, initialize: bool = True, compliant_test_mode: bool = False):
+    def init_joints(self, calibrate: bool = False, initialize: bool = True, compliant_test_mode: bool = False,
+                    calibrate_wrist: bool = False):
         ok, message = self._hand.connect(interactive=False)
         if not ok:
             raise RuntimeError(f"Could not connect to the ORCA hand: {message}")
-        if self.calibration_current_ma is None:
-            # Calibrates automatically when no calibration exists; moves to the config's neutral pose.
-            self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
-        else:
-            # This run's calibration current on every joint (the wrist too, unless config.yaml sets its own).
-            # orca_core needs max_current >= calibration_current and a retry current above it (the retry only runs
-            # for joints with a joint_motor_travel baseline): both raised for the calibration, then the config's
-            # values are back before the hand moves to neutral.
-            config = self._hand.config
-            current = self.calibration_current_ma
-            retry = config.calibration_retry_current
+        config = self._hand.config
+        if self.calibration_current_ma is not None:
+            # This run's calibration current on every joint (the wrist too, unless config.yaml sets its own). orca_core
+            # needs max_current >= calibration_current and a retry current above it (the retry only runs for joints
+            # with a joint_motor_travel baseline): raised for this start-up, the config's values restored after it.
+            current, retry = self.calibration_current_ma, config.calibration_retry_current
             self._hand.config = dataclasses.replace(
                 config, calibration_current=current, max_current=max(int(config.max_current), current),
                 calibration_retry_current=None if retry is None else max(int(retry), current + 100),
                 **({} if self._config_yaml.get("wrist_calibration_current") is not None
                    else dict(wrist_calibration_current=current)))
-            try:
-                self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=False)
-            finally:
-                self._hand.config = config
+        try:
+            if calibrate and calibrate_wrist:
+                # orca_core skips the wrist steps when the wrist is already calibrated; force_wrist runs them too
+                self._hand.calibrate(force_wrist=True)
+                calibrate = False  # done: init_joints below only sets up the hand
+            # Calibrates automatically when no calibration exists; moves to the config's neutral pose.
+            self._hand.init_joints(force_calibrate=calibrate, move_to_neutral=initialize)
+        finally:
+            self._hand.config = config
+        if self.calibration_current_ma is not None:
             self._hand.set_max_current(config.max_current)
-            if initialize:  # as orca_core's init_joints(move_to_neutral=True)
-                self._hand.set_joint_positions(OrcaJointPositions.from_dict(config.neutral_position),
-                                               num_steps=NUM_STEPS)
-                self._hand._settle_neutral_move()
         # The same servo acceleration ramp as the chirp recordings the sim was fit to (init_joints writes orca_core's own).
         self.servo_profile = servo_profile.apply(self._hand, self._config_yaml)
         if self.max_current_ma is not None:  # clamped by orca_core to each motor's hardware ceiling

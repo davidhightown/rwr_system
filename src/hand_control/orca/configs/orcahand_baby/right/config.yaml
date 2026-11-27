@@ -3,11 +3,12 @@
 # motors in ORCA order. Motor -> joint (AP = abduction, PP = proximal phalanx = mcp, DP = distal phalanx = pip):
 #   1 wrist   2 I-DP    3 I-PP    4 T-AP    5 T-DP    6 M-AP    7 R-AP    8 R-DP    9 R-PP
 #  10 P-PP   11 P-DP   12 P-AP   13 M-PP   14 M-DP   15 I-AP   16 T-PP   17 T-TP
-# UNVERIFIED (check with experiments/orca/motor_check.py --hand baby before the first calibration):
+# UNVERIFIED (check with src/hand_control/orca/motor_check.py --hand baby before the first calibration):
 #  - signs: checked with motor_check.py on 23 Nov for every joint except thumb_cmc and thumb_abd (their positive
 #    direction is not known yet). Bending joints: flex tendon on the top spool -> negative, on the bottom -> positive.
 #    Sideways joints: R tendon on the top spool -> negative (middle -6, pinky -12), L on top -> positive (index 15,
 #    ring 7); pinky_abd confirmed in the first calibration (its motor_check answer was the wrong way round).
+#    Exception: thumb_dip needs +5 although its flex tendon is on the top spool (seen on the hand, 27 Nov).
 #  - T-AP -> thumb_abd and T-TP -> thumb_cmc (if reversed, swap motors 4 and 17)
 #  - joint_roms and neutral_position are still the full-size hand's: measure the baby hand's hardstops
 # motor_type and baudrate are auto-detected at connect; set them here to pin a driver
@@ -68,7 +69,7 @@ joint_to_motor_map:
   thumb_cmc: 17     # T-TP: flex 15 top / ext 14 bottom   (T-TP = cmc assumed)
   thumb_abd: 4      # T-AP: L 17 top / R 20 bottom
   thumb_mcp: -16    # T-PP: flex 16 top / ext 13 bottom
-  thumb_dip: -5     # T-DP: flex 18 top / ext 19 bottom
+  thumb_dip: 5      # T-DP: flex 18 top / ext 19 bottom   (reversed on the hand: +5, seen 27 Nov)
   index_abd: 15     # I-AP: L 11 top / R 12 bottom
   index_mcp: -3     # I-PP: flex 24 top / ext 21 bottom
   index_pip: 2      # I-DP: ext 23 top / flex 22 bottom   (flex on the bottom spool)
@@ -152,8 +153,9 @@ neutral_position:
   pinky_mcp: -4
   pinky_pip: -2
   wrist: -20
-# Stalls every joint into its hardstops. 600 mA was too weak with the tightened tendons (first calibration,
-# 23 Nov): 800, and 900 for the retry of a joint that stopped short. Also tensioning_v2.py's winding current, as on the
+# Stalls every joint into its hardstops (the wrist too). 600 mA was too weak with the tightened tendons; 800 mA worked
+# (calibrations of 23 Nov). For one run: calibration_current_ma:=... of the controller launch. 900 for the retry of a
+# joint that stopped short (only with a joint_motor_travel baseline). Also tensioning_v2.py's winding current, as on the
 # full-size hand, so the tendons are wound taut under the load calibration drives the joints into their end stops with.
 calibration_current: 800
 calibration_retry_current: 900
@@ -164,8 +166,7 @@ calibration_step_size: 0.08
 calibration_step_period: 0.05
 calibration_num_stable: 10
 calibration_threshold: 0.01
-# As the full-size hand's, except that the thumb base (thumb_cmc) is held open (flex, its positive end) while the
-# other thumb joints are calibrated, so the thumb does not hit the palm.
+# The full-size hand's sequence.
 calibration_sequence:
 - step: 1
   joints:
@@ -173,30 +174,24 @@ calibration_sequence:
 - step: 2
   joints:
     thumb_cmc: extend
-- step: 3    # thumb base held open
+- step: 3
   joints:
     thumb_abd: flex
-    thumb_cmc: flex
-- step: 4    # thumb base held open
+- step: 4
   joints:
     thumb_abd: extend
-    thumb_cmc: flex
-- step: 5    # thumb base held open
+- step: 5
   joints:
     thumb_mcp: flex
-    thumb_cmc: flex
-- step: 6    # thumb base held open
+- step: 6
   joints:
     thumb_mcp: extend
-    thumb_cmc: flex
-- step: 7    # thumb base held open
+- step: 7
   joints:
     thumb_dip: flex
-    thumb_cmc: flex
-- step: 8    # thumb base held open
+- step: 8
   joints:
     thumb_dip: extend
-    thumb_cmc: flex
 - step: 9
   joints:
     index_abd: flex

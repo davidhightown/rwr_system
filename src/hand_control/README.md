@@ -30,5 +30,5 @@ The motors wind with the config's `calibration_current` and hold with its `max_c
   ros2 launch experiments orcahand_v2_joint_gui.launch.py
   ```
 
-**3. Calibration:** Without a stored calibration the hand calibrates automatically when (a) or (b) starts. After tensioning, recalibrate once by starting (a) with `calibrate:=true` (keep your hands clear while the joints move to their end stops). The calibration is saved as `calibration.yaml` next to the installed config (`install/hand_control/share/hand_control/orca/configs/orcahand_v2/right/`), so deleting `install/` means calibrating again.
+**3. Calibration:** Without a stored calibration the hand calibrates automatically when (a) or (b) starts. After tensioning, recalibrate once by starting (a) with `calibrate:=true` (keep your hands clear while the joints move to their end stops). The calibration is saved as `calibration.yaml` next to the installed config (`install/hand_control/share/hand_control/orca/configs/orcahand_v2/right/`), so deleting `install/` means calibrating again. For the baby hand add `hand:=baby` (its calibration is in `.../configs/orcahand_baby/right/`); `calibration_current_ma:=1000` calibrates every joint with another current than the config's, for one run. A wrist that is already calibrated is skipped; add `calibrate_wrist:=true` to calibrate it again.
 

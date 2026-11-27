@@ -10,7 +10,7 @@
 # example usage:
 # $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand_chirality:=right calibrate:=true launch_rviz:=true compliant_test_mode:=true
 # $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand:=baby calibrate:=true   # the baby hand
-# $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand:=baby calibrate:=true calibration_current_ma:=1000
+# $ ros2 launch hand_control orcahand_v2_controller_launch.yaml hand:=baby calibrate:=true calibrate_wrist:=true calibration_current_ma:=800
 # this launch file does not launch any nodes related to:
 # - cameras
 # - controllers
@@ -35,6 +35,11 @@ launch:
       name: "calibrate"
       default: "false"
       description: "Whether to calibrate the hand on startup"
+
+  - arg:
+      name: "calibrate_wrist"
+      default: "false"
+      description: "With calibrate:=true, also recalibrate the wrist when it is already calibrated (otherwise its steps are skipped)"
 
   - arg:
       name: "calibration_current_ma"
@@ -98,6 +103,8 @@ launch:
           value: "$(var compliant_test_mode)"
         - name: "hand_controller/calibration_current_ma"
           value: "$(var calibration_current_ma)"
+        - name: "hand_controller/calibrate_wrist"
+          value: "$(var calibrate_wrist)"
 
 
   # -------- Visualize target pose (commanded) --------
